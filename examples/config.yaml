@@ -1,0 +1,165 @@
+# netdesign example config — every option is listed with its default unless noted.
+# Sites, model and numbers are synthetic placeholders, not calibrated for any site.
+# Relative paths resolve against this file's directory.
+
+output_dir: out                # CLI --out overrides
+crs:
+  epsg: 4326                   # EPSG code of ALL horizontal input coordinates (candidates, target,
+                               # grid origin, 3D model): geographic -> long/lat (e.g. 4326, 4167),
+                               # projected -> easting/northing in metres (e.g. 2193 NZTM2000).
+                               # Elevations (z) are metres above mean sea level (e.g. from a DEM).
+phases: [P, S]                 # phases to model (grids, travel times)
+
+stations:
+  candidates: candidates.csv   # station,long,lat,z (geographic) | station,easting,northing,z
+
+grid:
+  mode: 3d                     # 3d (needed for velocity.heterogeneity) | 2d (layered only, GRID2D)
+  dx_km: 0.05                  # cubic cell size
+  depth_max_km: 6.0            # required; grid bottom, km below sea level
+  padding_km: 2.0              # around the candidates' bounding box
+  # origin: {lat: -38.60, long: 176.13}   # or {easting: ..., northing: ...}; default centroid
+
+nll:
+  # bin_dir: /path/to/NonLinLoc/bin       # default: programs on PATH
+  jobs: 4                      # parallel NonLinLoc runs (default: number of CPUs)
+  plfd_eps: 1.0e-2             # Grid2Time GT_PLFD homogeneous-source tolerance (see grid2time.py)
+  angles: false                # Grid2Time takeoff-angle grids
+  keep_grids: base             # after `sensitivity`: none | base (model_000, for validation) | all
+
+target:                        # where events are expected
+  long: [176.11, 176.15]       # or easting: [..] / northing: [..] for a projected crs
+  lat: [-38.62, -38.59]
+  depth_km: [0.5, 4.0]         # km below sea level
+  sampling: grid               # grid | random
+  spacing_km: 0.25             # grid: horizontal spacing
+  depth_spacing_km: 0.25       # grid: vertical spacing (default: spacing_km)
+  n_points: 2000               # random: number of points
+  seed: 0                      # random
+  depth_weight: {model: uniform}   # or {model: normal, mean_km: 2.5, sd_km: 0.75}
+  fd_step_km: null             # gradient step (default: grid.dx_km)
+
+picks:
+  sigma_s: {P: 0.005, S: 0.010}   # pick standard deviation, s
+  model_error: correlated      # none | independent | correlated (ensemble covariance between picks)
+  model_error_energy: 0.99     # correlated: fraction of ensemble travel-time variance kept
+
+validation:                    # `netdesign validate` (after `sensitivity`, keep_grids base|all)
+  n_events: 200                # synthetic events (target points), each with a random true model
+  seed: 0
+  stations: null               # network to test, e.g. [C01, C03, C07]; default all candidates
+  pick_noise: true             # add Gaussian pick noise (picks.sigma_s)
+  method: GAU_ANALYTIC         # NonLinLoc LOCMETH: GAU_ANALYTIC (L2, matches the prediction) | EDT_OT_WT
+  locgau_sigma_s: 0.0          # NonLinLoc LOCGAU model error, s (included in the prediction)
+  locgau_corr_len_km: 0.0      # NonLinLoc LOCGAU CorrLen between same-phase picks, km
+  locgrid_dx_km: 0.1           # initial search grid spacing
+  locgrid_margin_km: 1.0       # search grid extends this far beyond the target
+  oct_init_cells: [10, 10, 5]  # oct-tree initial cells
+  oct_min_node_km: 0.002       # oct-tree smallest node (location resolution)
+  oct_max_nodes: 20000
+
+design:                        # `netdesign design` (after `sensitivity`)
+  measure: achievable          # achievable (NonLinLoc-like, validated) | gls (lower bound)
+  criterion: rms               # rms (3D error) | percentile | logdet (error-ellipsoid volume)
+  percentile: 90               # for criterion: percentile (90 = worst 10% of the target)
+  vertical_weight: 1.0         # weight of depth error relative to horizontal
+  prior_sd_km: 5.0             # weak prior so tiny networks score finitely
+  prior_sd_t0_s: 1.0
+  fixed: []                    # existing stations always included, e.g. [C02]
+  exclude: []                  # candidates never used
+  n_min: null                  # smallest network size (default max(len(fixed), 3))
+  n_max: null                  # largest (default all usable candidates)
+  exchange: true               # improve greedy networks by swapping stations
+  n_restarts: 5                # extra exchange searches from random networks
+  n_random: 200                # random networks per size (baseline)
+  seed: 0
+  target_m: null               # recommend the smallest network meeting this criterion (m)
+  min_gain_pct: 5.0            # otherwise the knee: stop when one more station adds < 5%
+
+detection:                     # relative detectability (used by `design`); placeholders
+  enabled: true                # default false: every station picks every phase
+  frequency_band_hz: [5.0, 30.0]   # picking band
+  n_frequencies: 5
+  reference: per_phase         # per_phase: each phase vs its own arrivals | all_phases
+  reference_rank: 4            # margin measured from the 4th-strongest candidate arrival
+  s_to_p_amplitude: 5.0        # all_phases only: source S/P amplitude ratio (~ (Vp/Vs)^3)
+  margin_db: 20.0              # 50% detection this far below the reference arrival
+  width_db: 5.0                # transition width (1 sd)
+  margin_sensitivity_db: [5.0, 10.0, 15.0]   # extra margins the design is re-run at
+  default_site: surface
+  sites: {C10: borehole}       # station -> site type
+  site_types:                  # relative to each other; literature-style placeholders
+    surface: {kappa_s: 0.03, amplification: 2.0, noise_db: 0.0}
+    borehole: {kappa_s: 0.005, amplification: 1.0, noise_db: -20.0}
+
+qc:                            # checks + figures in <output_dir>/qc, report.html after each stage
+  enabled: true
+  dpi: 150
+  profile_samples: 20          # individual models drawn on the 1D profiles
+  slice_models: [1, 2]         # models shown in the heterogeneity slices
+  map_depths_km: null          # uncertainty-map depths; default top / middle / bottom of target
+  station_min_spacing_km: 0.05 # warn if candidates are closer than this
+  min_model_coverage: 0.8      # warn if a 3D starting model covers less of the grid
+  het_sd_tolerance: 0.25       # achieved vs requested heterogeneity sd (relative)
+  het_corr_len_tolerance: 0.35 # measured vs expected correlation length (relative)
+  eikonal_median_tol: 0.03     # | |grad T| * v - 1 |, median
+  eikonal_p99_tol: 0.10        # ... 99th percentile
+  validation_min_located: 0.95
+  validation_rms_ratio: [0.7, 1.4]   # NonLinLoc rms / predicted
+  validation_min_corr: 0.9           # corr(NonLinLoc, linear prediction)
+  validation_68_range: [0.55, 0.80]  # fraction inside predicted 68% ellipsoid
+  validation_95_range: [0.85, 0.99]
+  min_expected_p_picks: 4.0    # detection: expected P picks needed at a target point
+  min_expected_s_picks: 2.0
+  min_detection_coverage: 0.95 # fraction of target points that must have them
+
+velocity:
+  base: start_1d.layer         # NonLinLoc LAYER lines or CSV (top_km,vp,vs[,rho,...,qp,qs])
+  # Or a 3D starting model instead of `base` (give exactly one; needs grid.mode: 3d):
+  # model_3d: model_3d.csv     # nodes: long,lat,depth_km,vp,vs (or vpvs) on a regular grid;
+  #                            # nearest-edge values outside its extent. With a 3D model,
+  #                            # perturb uses only global vp_pct/vpvs, and heterogeneity
+  #                            # needs scalar amplitudes and no interface relief.
+
+  # Q from Vs by default: Qs = qs_per_vs * Vs[km/s], Qp = qp_qs_ratio * Qs.
+  # Omit the whole section for no Q.
+  attenuation:
+    model: vs_scaled           # vs_scaled | layered (qp/qs columns in a CSV model)
+    qs_per_vs: 50.0
+    qp_qs_ratio: 2.0
+    eta: 0.0                   # Q(f) = Q0 * (f / fref_hz) ** eta
+    fref_hz: 1.0
+
+  perturb:
+    enabled: true              # default false: starting model only
+    n_realizations: 100        # default 20
+    include_base: true         # model_000 = unperturbed starting model
+    sampling: latin_hypercube  # latin_hypercube | random
+    seed: 42                   # default 0
+    truncate_sd: 3.0           # draws truncated at this many sd
+    layer_corr: 0.5            # adjacent-layer correlation for per_layer draws (default 0)
+    vp_pct: {sd: 5.0, mode: per_layer}  # sd in %; mode global | per_layer (default sd 0)
+    vpvs: {sd: 0.03, mode: global}      # additive (default sd 0, global)
+    interface_sd_km: 0.05      # default 0
+    interface_clip: 0.45       # max shift / thinner adjacent layer (< 0.5 keeps order)
+    q_log10: {sd: 0.3, mode: global}    # factor ~2 on Q (default sd 0)
+    qpqs_sd_log10: 0.1         # default 0
+    eta_sd: 0.0
+
+  # 3D spatially correlated heterogeneity on top of each 1D-perturbed model (grid.mode: 3d).
+  # model_000 (the base) stays unperturbed. Fields regenerate exactly from (seed, model index).
+  heterogeneity:
+    enabled: true              # default false
+    seed: 1                    # default 0
+    structure:                 # spatial correlation shared by all fields
+      correlation: von_karman  # von_karman | exponential | gaussian
+      hurst: 0.3               # von_karman roughness (0-1; small = rough)
+      corr_len_km: [3.0, 1.0, 0.4]   # along strike, across strike, vertical (default [2, 2, 0.5])
+      strike_deg: 45.0         # along-strike azimuth, deg clockwise from N (default 0)
+    per_layer: true            # independent field per layer (abrupt change at interfaces)
+    vp_pct: [8.0, 6.0, 5.0, 3.0, 2.0]       # Vp sd %, scalar or per layer (default 0)
+    vpvs_sd: 0.03              # additive Vp/Vs sd, scalar or per layer (default 0)
+    interface_sd_km: [0.1, 0.15, 0.2, 0.3]  # interface relief sd, scalar or per interface (default 0)
+    interface_clip: 0.45       # max relief / thinner adjacent layer (< 0.5 keeps order)
+    truncate_sd: 3.0           # fields truncated at this many sd
+    pad_km: null               # FFT padding per side (default 2x the largest correlation length)

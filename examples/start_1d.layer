@@ -1,0 +1,7 @@
+# Synthetic placeholder 1D model (not site data).
+# LAYER  depth  VpTop VpGrad  VsTop VsGrad  rhoTop rhoGrad
+LAYER  -0.50  2.00  0.80  1.10  0.45  2.20  0.00
+LAYER   0.50  3.20  0.40  1.80  0.22  2.40  0.00
+LAYER   1.50  4.20  0.20  2.40  0.12  2.60  0.00
+LAYER   3.00  5.50  0.05  3.18  0.03  2.70  0.00
+LAYER   6.00  6.00  0.00  3.46  0.00  2.75  0.00
