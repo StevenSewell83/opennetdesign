@@ -30,8 +30,8 @@ Requires Python 3.11–3.12, [uv](https://docs.astral.sh/uv/) and a NonLinLoc bu
 uv sync --all-extras
 ```
 
-Point the package at NonLinLoc with `nll.bin_dir` in the config, or put the programs on
-`PATH`. For the tests, set `NETDESIGN_NLL_BIN=/path/to/NonLinLoc/bin`.
+Point the package at NonLinLoc with `nll.bin_dir` in the config (edit it in
+`examples/config.yaml` for your machine; the tests use it too), or put the programs on `PATH`.
 
 ## Usage
 

@@ -21,7 +21,7 @@ grid:
   # origin: {lat: -38.60, long: 176.13}   # or {easting: ..., northing: ...}; default centroid
 
 nll:
-  # bin_dir: /path/to/NonLinLoc/bin       # default: programs on PATH
+  bin_dir: /home/steve/seismic/NonLinLoc/src/bin   # NonLinLoc programs (default: on PATH)
   jobs: 4                      # parallel NonLinLoc runs (default: number of CPUs)
   plfd_eps: 1.0e-2             # Grid2Time GT_PLFD homogeneous-source tolerance (see grid2time.py)
   angles: false                # Grid2Time takeoff-angle grids
