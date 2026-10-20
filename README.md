@@ -23,12 +23,16 @@ Built on [NonLinLoc](https://github.com/alomax/NonLinLoc) for travel times and v
 
 ## Install
 
-Requires Python 3.11–3.12, [uv](https://docs.astral.sh/uv/) and a NonLinLoc build
-(`Vel2Grid`, `Grid2Time`, `NLLoc`; v7 tested).
+Requires Linux or macOS and a NonLinLoc build (`Vel2Grid`, `Grid2Time`, `NLLoc`; v7
+tested; see https://github.com/alomax/NonLinLoc). The installer sets up everything else —
+[uv](https://docs.astral.sh/uv/) if missing, Python 3.11/3.12 and a `.venv` with all
+dependencies:
 
 ```bash
-uv sync --all-extras
+./install.sh --nll-dir /path/to/NonLinLoc/bin --test   # --global: `netdesign` everywhere
 ```
+
+(Equivalent by hand: `uv sync --all-extras`.)
 
 Point the package at NonLinLoc with `nll.bin_dir` in the config (edit it in
 `examples/config.yaml` for your machine; the tests use it too), or put the programs on `PATH`.
