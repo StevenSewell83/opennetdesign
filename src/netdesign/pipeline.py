@@ -48,6 +48,7 @@ from netdesign.velocity import Ensemble, Layer, LayeredModel, make_ensemble
 from netdesign.velocity.model3d import NodeModel, SampledModel, sample_model
 
 __all__ = [
+    "check_run",
     "run_design",
     "run_ensemble",
     "run_sensitivity",
@@ -579,3 +580,27 @@ def _detection_inputs(
     if unknown:
         raise ConfigError(f"detection.sites: unknown station(s) {unknown}")
     return station_xyz, profiles, eta, fref, usable
+
+
+def check_run(cfg: Config) -> None:
+    """Fail fast, before the long sensitivity stage, on settings the later stages need.
+
+    Raises
+    ------
+    ConfigError
+        If a required section is missing or validation cannot run with these settings.
+    """
+    missing = [n for n in ("stations", "grid", "target") if getattr(cfg, n) is None]
+    if missing:
+        raise ConfigError(f"config is missing section(s) {missing}")
+    if cfg.validation.enabled:
+        if cfg.nll.keep_grids == "none":
+            raise ConfigError(
+                "validation.enabled needs the starting model's grids: set nll.keep_grids to "
+                "base (or all), or set validation.enabled: false"
+            )
+        if not cfg.velocity.perturb.include_base:
+            raise ConfigError(
+                "validation.enabled needs the unperturbed base model: set "
+                "velocity.perturb.include_base: true, or validation.enabled: false"
+            )

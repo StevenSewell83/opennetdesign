@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from netdesign.config import load_config
+from netdesign.config import Config, load_config
+from netdesign.design import DesignResult
 from netdesign.errors import NetDesignError
 from netdesign.pipeline import (
+    check_run,
     run_design,
     run_ensemble,
     run_sensitivity,
@@ -20,6 +23,8 @@ from netdesign.pipeline import (
     run_vel_grids,
 )
 from netdesign.qc.report import build_report
+from netdesign.sensitivity import Sensitivity
+from netdesign.validate import ValidationResult
 
 app = typer.Typer(no_args_is_help=True, help="Microseismic network design.")
 
@@ -82,13 +87,20 @@ def traveltimes(config: ConfigArg, out: OutOpt = None) -> None:
 
 
 @app.command()
-def sensitivity(config: ConfigArg, out: OutOpt = None) -> None:
-    """Travel times and gradients at the target points; writes <output_dir>/sensitivity."""
+def report(config: ConfigArg, out: OutOpt = None) -> None:
+    """Rebuild the QC report (<output_dir>/qc/report.html) from existing QC files."""
     try:
         cfg = load_config(config)
-        result = run_sensitivity(cfg, out)
     except NetDesignError as exc:
         raise _fail(exc) from exc
+    path = build_report(out or cfg.output_dir)
+    typer.echo(f"report: {path}")
+
+
+# ---------------------------------------------------------------- stage summaries
+
+
+def _echo_sensitivity(cfg: Config, out: Path | None, result: Sensitivity) -> None:
     r, s, p, j = result.T.shape
     typer.echo(
         f"sensitivities for {j} source point(s) x {s} station(s) x {p} phase(s) x {r} model(s) "
@@ -96,17 +108,7 @@ def sensitivity(config: ConfigArg, out: OutOpt = None) -> None:
     )
 
 
-@app.command()
-def validate(config: ConfigArg, out: OutOpt = None) -> None:
-    """Locate synthetic events with NonLinLoc; compare with predictions (<output_dir>/validation).
-
-    Run `sensitivity` first.
-    """
-    try:
-        cfg = load_config(config)
-        result = run_validate(cfg, out)
-    except NetDesignError as exc:
-        raise _fail(exc) from exc
+def _echo_validation(cfg: Config, out: Path | None, result: ValidationResult) -> None:
     s = result.summary
     typer.echo(f"located {s['n_located']} of {s['n_events']} synthetic events")
     if s["n_located"]:
@@ -128,15 +130,43 @@ def validate(config: ConfigArg, out: OutOpt = None) -> None:
     typer.echo(f"details in {(out or cfg.output_dir) / 'validation'}")
 
 
+def _echo_design(cfg: Config, out: Path | None, result: DesignResult) -> None:
+    data = json.loads(((out or cfg.output_dir) / "design" / "design.json").read_text())
+    names = data["recommended_stations"]
+    typer.echo(f"{'n':>3}  {cfg.design.criterion} ({cfg.design.measure}, m)  stations")
+    for net in data["networks"]:
+        mark = "*" if net["n"] == result.recommended_n else " "
+        typer.echo(f"{net['n']:>3}{mark} {net['criterion_m']:10.1f}  {' '.join(net['stations'])}")
+    typer.echo(f"recommended: {result.recommended_n} stations: {' '.join(names)}")
+    typer.echo(f"details in {(out or cfg.output_dir) / 'design'}; report in qc/report.html")
+
+
+# ---------------------------------------------------------------- stage commands
+
+
 @app.command()
-def report(config: ConfigArg, out: OutOpt = None) -> None:
-    """Rebuild the QC report (<output_dir>/qc/report.html) from existing QC files."""
+def sensitivity(config: ConfigArg, out: OutOpt = None) -> None:
+    """Travel times and gradients at the target points; writes <output_dir>/sensitivity."""
     try:
         cfg = load_config(config)
+        result = run_sensitivity(cfg, out)
     except NetDesignError as exc:
         raise _fail(exc) from exc
-    path = build_report(out or cfg.output_dir)
-    typer.echo(f"report: {path}")
+    _echo_sensitivity(cfg, out, result)
+
+
+@app.command()
+def validate(config: ConfigArg, out: OutOpt = None) -> None:
+    """Locate synthetic events with NonLinLoc; compare with predictions (<output_dir>/validation).
+
+    Run `sensitivity` first.
+    """
+    try:
+        cfg = load_config(config)
+        result = run_validate(cfg, out)
+    except NetDesignError as exc:
+        raise _fail(exc) from exc
+    _echo_validation(cfg, out, result)
 
 
 @app.command()
@@ -147,11 +177,31 @@ def design(config: ConfigArg, out: OutOpt = None) -> None:
         result = run_design(cfg, out)
     except NetDesignError as exc:
         raise _fail(exc) from exc
-    data = json.loads(((out or cfg.output_dir) / "design" / "design.json").read_text())
-    names = data["recommended_stations"]
-    typer.echo(f"{'n':>3}  {cfg.design.criterion} ({cfg.design.measure}, m)  stations")
-    for net in data["networks"]:
-        mark = "*" if net["n"] == result.recommended_n else " "
-        typer.echo(f"{net['n']:>3}{mark} {net['criterion_m']:10.1f}  {' '.join(net['stations'])}")
-    typer.echo(f"recommended: {result.recommended_n} stations: {' '.join(names)}")
-    typer.echo(f"details in {(out or cfg.output_dir) / 'design'}; report in qc/report.html")
+    _echo_design(cfg, out, result)
+
+
+@app.command()
+def run(config: ConfigArg, out: OutOpt = None) -> None:
+    """Run the whole pipeline: sensitivity, validate (if validation.enabled), design.
+
+    Stops at the first stage that fails. The QC report is rebuilt after every stage.
+    """
+    try:
+        cfg = load_config(config)
+        check_run(cfg)
+        start = time.perf_counter()
+        typer.secho("== sensitivity", bold=True)
+        _echo_sensitivity(cfg, out, run_sensitivity(cfg, out))
+        if cfg.validation.enabled:
+            typer.secho("== validate", bold=True)
+            _echo_validation(cfg, out, run_validate(cfg, out))
+        else:
+            typer.echo("(validation skipped: validation.enabled is false)")
+        typer.secho("== design", bold=True)
+        _echo_design(cfg, out, run_design(cfg, out))
+    except NetDesignError as exc:
+        raise _fail(exc) from exc
+    typer.echo(
+        f"finished in {(time.perf_counter() - start) / 60:.1f} min; "
+        f"report: {(out or cfg.output_dir) / 'qc' / 'report.html'}"
+    )

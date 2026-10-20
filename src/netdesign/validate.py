@@ -59,6 +59,7 @@ class ValidateSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool = Field(True, description="include the validation stage in `netdesign run`")
     n_events: int = Field(200, ge=1)
     seed: int = 0
     stations: list[str] | None = Field(None, description="network to test; default all")

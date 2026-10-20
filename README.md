@@ -35,12 +35,20 @@ Point the package at NonLinLoc with `nll.bin_dir` in the config (edit it in
 
 ## Usage
 
-Everything is configured in one YAML file; `examples/config.yaml` lists every option with
-its default (synthetic example sites and model).
+Everything is configured in one YAML file. Start a project from `templates/config.yaml`
+(the commonly used parameters; fill in the lines marked `EDIT`); `examples/config.yaml`
+lists every option with its default (synthetic example sites and model).
+
+```bash
+source /path/to/netdesign/.venv/bin/activate   # or prefix: uv run --project /path/to/netdesign
+netdesign run config.yaml           # everything: sensitivity, validate, design (+ QC report)
+```
+
+or stage by stage:
 
 ```bash
 netdesign sensitivity config.yaml   # ensemble, grids, travel times, sensitivities (+ QC)
-netdesign validate    config.yaml   # optional: NonLinLoc check of the predictions
+netdesign validate    config.yaml   # NonLinLoc check of the predictions (validation.enabled)
 netdesign design      config.yaml   # optimal networks and recommended size
 netdesign report      config.yaml   # rebuild <output_dir>/qc/report.html
 ```

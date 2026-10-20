@@ -45,6 +45,7 @@ picks:
   model_error_energy: 0.99     # correlated: fraction of ensemble travel-time variance kept
 
 validation:                    # `netdesign validate` (after `sensitivity`, keep_grids base|all)
+  enabled: true                # include this stage in `netdesign run`
   n_events: 200                # synthetic events (target points), each with a random true model
   seed: 0
   stations: null               # network to test, e.g. [C01, C03, C07]; default all candidates

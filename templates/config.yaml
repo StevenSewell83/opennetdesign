@@ -1,0 +1,102 @@
+# netdesign — project configuration template
+#
+# Copy this file into your project folder, fill in every line marked EDIT, then run:
+#   netdesign sensitivity config.yaml
+#   netdesign validate    config.yaml      (optional check against NonLinLoc)
+#   netdesign design      config.yaml
+# Results: <output_dir>/design/ and <output_dir>/qc/report.html
+#
+# Only the commonly used parameters are listed; everything else takes its default.
+# examples/config.yaml documents every option. Relative paths are relative to this file.
+
+output_dir: out
+
+# ---------------------------------------------------------------- coordinates
+crs:
+  epsg: 4326                       # coordinate system of ALL horizontal inputs:
+                                   # 4326 = WGS-84 long/lat (e.g. SRTM); 2193 = NZTM2000 E/N
+
+# ---------------------------------------------------------------- candidate sites
+stations:
+  candidates: candidates.csv       # EDIT: header station,long,lat,z (z = metres above sea level;
+                                   # boreholes: the sensor's elevation, not the wellhead's)
+
+# ---------------------------------------------------------------- where events are expected
+target:
+  long: [176.00, 176.10]           # EDIT: target box (or easting/northing for a projected crs)
+  lat: [-38.70, -38.60]            # EDIT
+  depth_km: [0.5, 4.0]             # EDIT: km below sea level
+  spacing_km: 0.25                 # target sampling (horizontal)
+  depth_spacing_km: 0.25           # target sampling (vertical)
+  depth_weight: {model: uniform}   # or {model: normal, mean_km: 2.5, sd_km: 0.75}
+
+# ---------------------------------------------------------------- velocity model
+velocity:
+  base: model.layer                # EDIT: 1D model, NonLinLoc LAYER lines or CSV
+  # model_3d: model_3d.csv         # or a 3D node model instead of base (needs grid.mode: 3d)
+
+  attenuation:                     # Q from Vs: Qs = qs_per_vs * Vs[km/s], Qp = qp_qs_ratio * Qs
+    qs_per_vs: 50.0
+    qp_qs_ratio: 2.0
+
+  perturb:                         # 1D velocity-model uncertainty
+    enabled: true
+    n_realizations: 100
+    seed: 1
+    vp_pct: {sd: 5.0, mode: per_layer}     # Vp uncertainty, % (1 sd)
+    vpvs: {sd: 0.03, mode: global}         # Vp/Vs uncertainty
+    interface_sd_km: 0.05                  # interface depth uncertainty (layered model only)
+    q_log10: {sd: 0.3, mode: global}       # Q uncertainty (0.3 ~ factor of 2)
+    layer_corr: 0.5
+
+  heterogeneity:                   # 3D lateral variation (needs grid.mode: 3d)
+    enabled: true
+    seed: 1
+    structure:
+      correlation: von_karman
+      hurst: 0.3
+      corr_len_km: [3.0, 1.0, 0.4]         # along strike, across strike, vertical
+      strike_deg: 45.0                     # EDIT: dominant structural trend, deg from north
+    per_layer: true
+    vp_pct: 5.0                            # Vp sd, %; or one value per layer, e.g. [8, 6, 4, 3, 2]
+    vpvs_sd: 0.03
+    interface_sd_km: 0.15                  # interface relief; or one per interface
+
+# ---------------------------------------------------------------- grids and NonLinLoc
+grid:
+  mode: 3d                         # 3d (with heterogeneity / 3D model) | 2d (1D model only, fast)
+  dx_km: 0.05
+  depth_max_km: 6.0                # EDIT: below the deepest target, with margin
+  padding_km: 2.0                  # around the candidates
+
+nll:
+  bin_dir: /home/steve/seismic/NonLinLoc/src/bin   # EDIT: NonLinLoc programs
+  keep_grids: base                 # keep the starting model's grids (needed for `validate`)
+
+# ---------------------------------------------------------------- picking
+picks:
+  sigma_s: {P: 0.005, S: 0.010}    # pick uncertainty (1 sd), s
+
+# ---------------------------------------------------------------- detectability
+detection:
+  enabled: true
+  margin_db: 20.0                  # smaller = designing for smaller events (5-10 dB: near threshold)
+  sites: {}                        # EDIT: borehole sites, e.g. {BH01: borehole, BH02: borehole}
+  site_types:                      # relative values; replace with measurements if available
+    surface: {kappa_s: 0.03, amplification: 2.0, noise_db: 0.0}
+    borehole: {kappa_s: 0.005, amplification: 1.0, noise_db: -20.0}
+
+# ---------------------------------------------------------------- network design
+design:
+  fixed: []                        # EDIT: existing stations that must be kept, e.g. [ST01, ST02]
+  exclude: []                      # candidates not to use
+  n_max: null                      # largest network to consider (default: all candidates)
+  criterion: rms                   # rms 3D error | percentile (worst part of target) | logdet
+  vertical_weight: 1.0             # >1 to favour depth accuracy
+  target_m: null                   # EDIT (optional): accuracy goal in m; recommends the smallest
+                                   # network meeting it (else the 5 % improvement knee)
+
+# ---------------------------------------------------------------- validation
+validation:
+  enabled: true                    # include in `netdesign run` (NonLinLoc check)
+  n_events: 200

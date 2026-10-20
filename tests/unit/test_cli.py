@@ -58,3 +58,59 @@ def test_output_dir_from_config(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["ensemble", str(cfg)])
     assert result.exit_code == 0, result.output
     assert (tmp_path / "results" / "models" / "model_000.layer").is_file()
+
+
+def test_user_template_is_valid() -> None:
+    """templates/config.yaml must load (every key known, values in range)."""
+    template = EXAMPLE.parents[1] / "templates" / "config.yaml"
+    cfg = load_config(template)
+    assert cfg.velocity.heterogeneity.enabled and cfg.detection.enabled
+    assert cfg.grid is not None and cfg.grid.mode == "3d"
+
+
+def test_run_command_end_to_end(tmp_path: Path, nll_bin: Path) -> None:
+    from example_config import write_example
+
+    path = write_example(
+        tmp_path,
+        nll_bin,
+        grid={"dx_km": 0.2},
+        velocity={"perturb": {"n_realizations": 2}},
+        validation={"n_events": 10},
+        design={"n_random": 5, "n_restarts": 1},
+    )
+    result = CliRunner().invoke(app, ["run", str(path)])
+    assert result.exit_code == 0, result.output
+    for stage in ("== sensitivity", "== validate", "== design", "recommended:", "finished in"):
+        assert stage in result.output
+    out = tmp_path / "out"
+    assert (out / "design" / "design.json").is_file()
+    assert (out / "validation" / "summary.json").is_file()
+    assert "<h2>Network design</h2>" in (out / "qc" / "report.html").read_text()
+
+
+def test_run_skips_validation_when_disabled(tmp_path: Path, nll_bin: Path) -> None:
+    from example_config import write_example
+
+    path = write_example(
+        tmp_path,
+        nll_bin,
+        grid={"dx_km": 0.2},
+        velocity={"perturb": {"n_realizations": 2}},
+        validation={"enabled": False},
+        design={"n_random": 5, "n_restarts": 1},
+    )
+    result = CliRunner().invoke(app, ["run", str(path)])
+    assert result.exit_code == 0, result.output
+    assert "validation skipped" in result.output
+    assert not (tmp_path / "out" / "validation").exists()
+
+
+def test_run_fails_fast_on_settings_validation_cannot_use(tmp_path: Path) -> None:
+    from example_config import write_example
+
+    path = write_example(tmp_path, None, nll={"keep_grids": "none"})
+    result = CliRunner().invoke(app, ["run", str(path)])
+    assert result.exit_code == 1
+    assert "keep_grids" in result.output
+    assert not (tmp_path / "out").exists()  # failed before doing any work
