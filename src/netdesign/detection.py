@@ -28,6 +28,28 @@ setting the scale for every other station; arrivals stronger than the reference 
 S are picked against their own noise (vertical vs horizontal components) and P onsets are
 usually as pickable as the larger S arrivals. ``all_phases`` takes one maximum over both
 phases, with S scaled by ``s_to_p_amplitude``; P is then typically ~14 dB down.
+
+Magnitude mode (``mode: magnitude``)
+------------------------------------
+Absolute signal-to-noise for an event of moment magnitude ``magnitude``, so the design is
+for the smallest event that should be located. The far-field ground-velocity Fourier
+amplitude is (Brune source; Aki & Richards; Boore 2003)::
+
+    V(f) = 2 pi f * rad_p M0 amp_s / (4 pi rho v_src^3 R) * 1 / (1 + (f / fc)^2)
+           * exp(-pi f (t*(f) + kappa_s))
+
+with ``M0 = 10^(1.5 Mw + 9.1)`` N m, ``fc = 0.4906 beta_src (stress_drop / M0)^(1/3)``
+(``beta_src``, ``v_src`` the S and phase velocity at the source in the realization's
+profile), ``rho = density_kg_m3`` and ``rad_p`` the average radiation coefficient (0.52 P,
+0.63 S). The signal is compared with the site's noise (``noise_psd_db``, acceleration PSD,
+dB rel. 1 (m/s^2)^2/Hz, flat across the band) over ``signal_window_s``::
+
+    SNR = (2 int |V|^2 df / signal_window_s) / int noise_psd / (2 pi f)^2 df
+
+both integrals over ``frequency_band_hz`` (trapezoid on ``n_frequencies`` log-spaced points).
+The detection probability is ``Phi((10 log10 SNR - snr_threshold_db) / width_db)``. Same
+straight-line ``1/R`` spreading and ``t*`` as the relative mode; no source directivity or
+site resonance.
 """
 
 from __future__ import annotations
@@ -63,12 +85,15 @@ class SiteType(BaseModel):
     kappa_s: float = Field(0.03, ge=0, description="near-surface attenuation kappa0, s")
     amplification: float = Field(2.0, gt=0, description="site amplification (incl. free surface)")
     noise_db: float = Field(0.0, description="noise level relative to other site types, dB")
+    noise_psd_db: float | None = Field(
+        None, description="magnitude mode: noise acceleration PSD, dB rel. 1 (m/s^2)^2/Hz"
+    )
 
 
 def _default_site_types() -> dict[str, SiteType]:
     return {
-        "surface": SiteType(),
-        "borehole": SiteType(kappa_s=0.005, amplification=1.0, noise_db=-20.0),
+        "surface": SiteType(noise_psd_db=-130.0),
+        "borehole": SiteType(kappa_s=0.005, amplification=1.0, noise_db=-20.0, noise_psd_db=-150.0),
     }
 
 
@@ -78,6 +103,7 @@ class DetectionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    mode: Literal["relative", "magnitude"] = "relative"
     frequency_band_hz: tuple[float, float] = (5.0, 30.0)
     n_frequencies: int = Field(5, ge=1)
     reference: Literal["per_phase", "all_phases"] = "per_phase"
@@ -93,6 +119,17 @@ class DetectionSpec(BaseModel):
     margin_sensitivity_db: list[float] = Field(
         default_factory=lambda: [5.0, 10.0, 15.0], description="extra margins to test"
     )
+    magnitude: float = Field(0.0, description="magnitude mode: smallest event to locate, Mw")
+    magnitude_sensitivity: list[float] = Field(
+        default_factory=lambda: [-0.5, 0.5, 1.0], description="extra magnitudes to test"
+    )
+    stress_drop_mpa: float = Field(1.0, gt=0)
+    density_kg_m3: float = Field(2700.0, gt=0)
+    radiation: dict[str, float] = Field(
+        default_factory=lambda: {"P": 0.52, "S": 0.63}, description="average radiation"
+    )
+    snr_threshold_db: float = Field(10.0, description="50 % picking probability at this SNR")
+    signal_window_s: float = Field(0.5, gt=0, description="window the SNR is measured over")
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -105,7 +142,21 @@ class DetectionSpec(BaseModel):
         missing = sorted(types - set(self.site_types))
         if missing:
             raise ConfigError(f"detection: undefined site type(s) {missing}")
+        if self.mode == "magnitude":
+            no_psd = sorted(t for t in types if self.site_types[t].noise_psd_db is None)
+            if no_psd:
+                raise ConfigError(
+                    f"detection.site_types {no_psd}: magnitude mode needs noise_psd_db"
+                )
         return self
+
+    @property
+    def sensitivity_values(self) -> tuple[str, list[float], float]:
+        """The design-event knob of this mode: key, values to test and the design value."""
+        if self.mode == "magnitude":
+            values = sorted({*self.magnitude_sensitivity, self.magnitude})
+            return "magnitude", values, self.magnitude
+        return "margin_db", sorted({*self.margin_sensitivity_db, self.margin_db}), self.margin_db
 
 
 def relative_detection(
@@ -117,8 +168,12 @@ def relative_detection(
     spec: DetectionSpec,
     usable: list[int] | None = None,
     margin_db: float | None = None,
+    magnitude: float | None = None,
 ) -> tuple[FloatArray, FloatArray]:
-    """Detection probability and relative SNR (dB), both shaped (R, S, P, J).
+    """Detection probability and SNR (dB), both shaped (R, S, P, J).
+
+    The SNR is relative to the reference arrival (relative mode) or to the 50 % threshold
+    ``snr_threshold_db`` (magnitude mode).
 
     Parameters
     ----------
@@ -126,7 +181,8 @@ def relative_detection(
     profiles : one per realization; returns ``(vp, vs, qp, qs)`` at the given depths.
     eta : frequency exponent per realization.
     usable : candidates the best-arrival reference is taken over (default all).
-    margin_db : overrides ``spec.margin_db``.
+    margin_db : overrides ``spec.margin_db`` (relative mode).
+    magnitude : overrides ``spec.magnitude`` (magnitude mode).
     """
     n_r, n_s, n_p, n_j = sens.T.shape
     if len(profiles) != n_r or len(eta) != n_r:
@@ -149,7 +205,16 @@ def relative_detection(
     site = [spec.site_types[spec.sites.get(n, spec.default_site)] for n in names]
     kappa = np.array([s.kappa_s for s in site])
     amp = np.array([s.amplification for s in site])
-    noise = np.array([s.noise_db for s in site])
+    absolute = spec.mode == "magnitude"
+    if absolute:
+        mw = spec.magnitude if magnitude is None else magnitude
+        m0 = 10 ** (1.5 * mw + 9.1)
+        df = _trapezoid_weights(freqs, spec.frequency_band_hz)
+        psd = np.array([10 ** (s.noise_psd_db / 10) for s in site if s.noise_psd_db is not None])
+        noise_power = psd * np.sum(df / (2 * np.pi * freqs) ** 2)  # (S,), (m/s)^2
+        noise = 10 * np.log10(noise_power)
+    else:
+        noise = np.array([s.noise_db for s in site])
     phase_c = np.array(
         [
             1.0 if p == "P" or spec.reference == "per_phase" else spec.s_to_p_amplitude
@@ -161,6 +226,9 @@ def relative_detection(
     flat = z_path.ravel()
     for r in range(n_r):
         vp, vs, qp, qs = profiles[r](flat)
+        if absolute:
+            vp_src, vs_src, _, _ = profiles[r](src[:, 2])
+            fc = 0.4906 * vs_src * 1000 * (spec.stress_drop_mpa * 1e6 / m0) ** (1 / 3)  # (J,)
         for ip, phase in enumerate(sens.phases):
             v = (vp if phase == "P" else vs).reshape(z_path.shape)
             q0 = (qp if phase == "P" else qs).reshape(z_path.shape)
@@ -168,11 +236,31 @@ def relative_detection(
             mean_inv_q0 = (slow / q0).sum(axis=-1) / slow.sum(axis=-1)  # (S, J), at fref
             t = sens.T[r, :, ip].astype(np.float64)  # (S, J)
             spectrum = np.zeros((n_s, n_j))
+            if absolute:
+                v_src = (vp_src if phase == "P" else vs_src) * 1000  # m/s
+                rad = spec.radiation.get(phase, 0.6)
+                scale = rad * m0 / (4 * np.pi * spec.density_kg_m3 * v_src**3)  # (J,)
+                for f, w in zip(freqs, df, strict=True):
+                    t_star = t * mean_inv_q0 * (f / fref_hz) ** (-eta[r])
+                    u = (
+                        scale
+                        * amp[:, None]
+                        / (dist * 1000)
+                        / (1 + (f / fc) ** 2)
+                        * np.exp(-np.pi * f * (t_star + kappa[:, None]))
+                    )
+                    spectrum += w * (2 * np.pi * f * u) ** 2
+                signal_power = 2 * spectrum / spec.signal_window_s  # mean-square velocity
+                level[r, :, ip] = 10 * np.log10(signal_power) - noise[:, None]
+                continue
             for f in freqs:
                 t_star = t * mean_inv_q0 * (f / fref_hz) ** (-eta[r])
                 spectrum += np.exp(-np.pi * f * (t_star + kappa[:, None]))
             a = phase_c[ip] * amp[:, None] * (spectrum / len(freqs)) / dist
             level[r, :, ip] = 20 * np.log10(a) - noise[:, None]
+    if absolute:
+        q = level - spec.snr_threshold_db
+        return ndtr(q / spec.width_db), q
     sub = level[:, usable]  # (R, S', P, J)
     if spec.reference == "per_phase":
         ranked = -np.sort(-sub, axis=1)  # strongest first, per realization, phase, event
@@ -186,6 +274,17 @@ def relative_detection(
     q = level - ref
     m = spec.margin_db if margin_db is None else margin_db
     return ndtr((q + m) / spec.width_db), q
+
+
+def _trapezoid_weights(freqs: FloatArray, band: tuple[float, float]) -> FloatArray:
+    """Integration weights over ``freqs`` (a single frequency gets the band width)."""
+    if len(freqs) == 1:
+        return np.array([max(band[1] - band[0], 1.0)])
+    gaps = np.diff(freqs)
+    w = np.zeros_like(freqs)
+    w[:-1] += gaps / 2
+    w[1:] += gaps / 2
+    return w
 
 
 def _layered_profile(model: LayeredModel) -> Profile:

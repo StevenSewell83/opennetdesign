@@ -115,7 +115,8 @@ def _extra_tables(stage: str, data: dict[str, Any]) -> str:
         parts.append("<h3>Best network per size</h3>" + _table(data["networks"]))
         if data.get("margin_sensitivity"):
             parts.append(
-                "<h3>Sensitivity to the detection margin</h3>" + _table(data["margin_sensitivity"])
+                "<h3>Sensitivity to the design event size (detection margin or magnitude)</h3>"
+                + _table(data["margin_sensitivity"])
             )
     if stage == "validation" and "summary" in data:
         s = data["summary"]

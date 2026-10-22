@@ -15,10 +15,15 @@ dependencies = [
     "typer",
     "pyproj>=3.7.2",
     "matplotlib>=3.11.2",
+    "numba>=0.68.0",
+    "pyshp>=3.1.6",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "mypy", "types-PyYAML"]
+dem = [
+    "rasterio>=1.4.4",
+]
 
 [project.scripts]
 netdesign = "netdesign.cli:app"
@@ -41,7 +46,7 @@ plugins = ["pydantic.mypy"]
 files = ["src/netdesign"]
 
 [[tool.mypy.overrides]]
-module = ["scipy.*"]
+module = ["scipy.*", "rasterio.*", "shapefile.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

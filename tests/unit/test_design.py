@@ -123,6 +123,31 @@ def test_gls_criteria_never_worse_with_more_stations(criterion: str) -> None:
     assert all(b <= a * (1 + 1e-9) for a, b in itertools.pairwise(scores))
 
 
+@pytest.mark.parametrize("measure", ["achievable", "gls"])
+@pytest.mark.parametrize("criterion", ["rms", "percentile", "logdet"])
+@pytest.mark.parametrize("model_error", ["correlated", "none"])
+@pytest.mark.parametrize("detect", [False, True])
+def test_score_batch_matches_score(
+    measure: str, criterion: str, model_error: str, detect: bool
+) -> None:
+    """The compiled batch scores equal the numpy reference for every configuration."""
+    sens = straight_ray(ring_with_decoys(), target_points())
+    picks = PickSpec(sigma_s={"P": 0.005, "S": 0.01}, model_error=model_error)
+    det = None
+    if detect:
+        det = np.random.default_rng(2).uniform(0.3, 1.0, sens.T.shape)
+    spec = DesignSpec(measure=measure, criterion=criterion, vertical_weight=2.0, jobs=3)
+    ev = Evaluator(sens, picks, spec, det)
+    base = [0, 3, 9]
+    add = np.array([[5, -1], [1, 6], [-1, -1], [11, 2]])
+    sub = np.array([[3], [-1], [0], [9]])
+    nets = [[0, 9, 5], [0, 3, 9, 1, 6], [3, 9], [0, 3, 11, 2]]
+    np.testing.assert_allclose(
+        ev.score_batch(base, add, sub), [ev.score(n) for n in nets], rtol=1e-9
+    )
+    np.testing.assert_allclose(ev.score_batch([], [nets[1]]), [ev.score(nets[1])], rtol=1e-9)
+
+
 def _net(n: int, c: float) -> NetworkResult:
     return NetworkResult(n, tuple(range(n)), c, c, 1, None, None, {})
 
@@ -161,3 +186,54 @@ def test_design_end_to_end(tmp_path: Path, nll_bin: Path) -> None:
     statuses = [r.split(",")[4] for r in rows[1:]]
     assert statuses.count("selected") == result.recommended_n
     assert "<h2>Network design</h2>" in (q / "report.html").read_text()
+
+
+def _dense_grid() -> np.ndarray:
+    g = np.arange(-4.0, 4.01, 1.0)
+    x, y = np.meshgrid(g, g)
+    return np.column_stack([x.ravel(), y.ravel(), np.zeros(x.size)])
+
+
+@pytest.mark.parametrize("sep", [1.0, 1.5])
+def test_min_separation_respected(sep: float) -> None:
+    stations = _dense_grid()
+    sens = straight_ray(stations, target_points())
+    spec = DesignSpec(n_min=3, n_max=8, n_random=20, n_restarts=3, min_separation_km=sep)
+    result = optimise(
+        Evaluator(sens, PICKS, spec), sens.stations, spec, np.random.default_rng(0), stations
+    )
+    for net in result.networks.values():
+        p = stations[list(net.stations), :2]
+        d = np.linalg.norm(p[:, None] - p[None], axis=-1)
+        np.fill_diagonal(d, np.inf)
+        assert d.min() > sep, net  # grid neighbours exactly `sep` apart are excluded too
+
+
+def test_min_separation_zero_changes_nothing() -> None:
+    stations = _dense_grid()
+    sens = straight_ray(stations, target_points())
+    spec = DesignSpec(n_min=3, n_max=6, n_random=20, n_restarts=2)
+    ev = Evaluator(sens, PICKS, spec)
+    a = optimise(ev, sens.stations, spec, np.random.default_rng(0))
+    b = optimise(ev, sens.stations, spec, np.random.default_rng(0), stations)
+    assert a.networks == b.networks
+
+
+def test_min_separation_limits_sizes_and_fixed_exempt() -> None:
+    stations = _dense_grid()  # 9 x 9 at 1 km: at most 9 stations more than 3 km apart
+    sens = straight_ray(stations, target_points())
+    spec = DesignSpec(n_min=3, n_max=20, n_random=0, min_separation_km=3.0, fixed=["S40", "S41"])
+    result = optimise(
+        Evaluator(sens, PICKS, spec), sens.stations, spec, np.random.default_rng(0), stations
+    )
+    assert max(result.networks) < 20
+    assert any("larger sizes skipped" in n for n in result.notes)
+    for net in result.networks.values():
+        assert {40, 41} <= set(net.stations)  # fixed pair 1 km apart is kept
+    with pytest.raises(ConfigError, match="fewer than n_min"):
+        big = DesignSpec(n_min=15, n_random=0, min_separation_km=3.0)
+        optimise(
+            Evaluator(sens, PICKS, big), sens.stations, big, np.random.default_rng(0), stations
+        )
+    with pytest.raises(ConfigError, match="station coordinates"):
+        optimise(Evaluator(sens, PICKS, spec), sens.stations, spec, np.random.default_rng(0))

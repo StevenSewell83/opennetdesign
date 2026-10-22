@@ -16,6 +16,7 @@ from netdesign.frame import GridSpec
 from netdesign.information import PickSpec
 from netdesign.nll import NLLSpec, Phase
 from netdesign.qc.checks import QCSpec
+from netdesign.sites import SitesSpec
 from netdesign.target import TargetSpec
 from netdesign.validate import ValidateSpec
 from netdesign.velocity import AttenuationSpec, PerturbSpec
@@ -76,6 +77,7 @@ class Config(BaseModel):
     phases: tuple[Phase, ...] = Field(("P", "S"), min_length=1)
     velocity: VelocityConfig
     stations: StationsConfig | None = None
+    sites: SitesSpec | None = None  # generates stations.candidates
     grid: GridSpec | None = None
     nll: NLLSpec = NLLSpec()
     target: TargetSpec | None = None
@@ -131,10 +133,16 @@ def load_config(path: str | Path) -> Config:
         config.stations.candidates = resolve(config.stations.candidates)
     if config.nll.bin_dir is not None:
         config.nll.bin_dir = resolve(config.nll.bin_dir)
+    if config.sites is not None:
+        config.sites.dem.cache_dir = resolve(config.sites.dem.cache_dir)
+        if config.sites.dem.path is not None:
+            config.sites.dem.path = resolve(config.sites.dem.path)
     # Check now that every coordinate input matches the declared crs.
     crs = config.input_crs
     if config.target is not None:
-        config.target.box(crs)
+        config.target.check_crs(crs)
     if config.grid is not None and config.grid.origin is not None:
         config.grid.origin.to_wgs84(crs)
+    if config.sites is not None:
+        config.sites.centre.to_wgs84(crs, where="sites.centre")
     return config

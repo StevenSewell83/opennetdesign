@@ -21,11 +21,24 @@ stations:
   candidates: candidates.csv       # EDIT: header station,long,lat,z (z = metres above sea level;
                                    # boreholes: the sensor's elevation, not the wellhead's)
 
+# Or generate the candidates on a grid with DEM elevations: `netdesign sites config.yaml`
+# writes stations.candidates (downloads Copernicus 30 m DEM; see examples/config.yaml).
+# sites:
+#   centre: {lat: -38.65, long: 176.05}   # EDIT: grid centre
+#   spacing_m: 1000.0                      # EDIT
+#   extent_m: [8000.0, 8000.0]             # EDIT: full width E-W, N-S
+#   shape: rectangle                       # or ellipse
+#   min_elevation_m: 1.0                   # drop sea/shore sites
+
 # ---------------------------------------------------------------- where events are expected
 target:
   long: [176.00, 176.10]           # EDIT: target box (or easting/northing for a projected crs)
   lat: [-38.70, -38.60]            # EDIT
   depth_km: [0.5, 4.0]             # EDIT: km below sea level
+  # or several (rotatable) boxes instead of long/lat; see examples/config.yaml:
+  # boxes:
+  #   - {centre: {lat: -38.65, long: 176.05}, size_km: [1.0, 3.0], rotation_deg: 45.0}
+  #   - {centre: {lat: -38.62, long: 176.08}, size_km: [2.0, 2.0], depth_km: [2.0, 5.0]}
   spacing_km: 0.25                 # target sampling (horizontal)
   depth_spacing_km: 0.25           # target sampling (vertical)
   depth_weight: {model: uniform}   # or {model: normal, mean_km: 2.5, sd_km: 0.75}
@@ -80,17 +93,24 @@ picks:
 # ---------------------------------------------------------------- detectability
 detection:
   enabled: true
-  margin_db: 20.0                  # smaller = designing for smaller events (5-10 dB: near threshold)
+  mode: magnitude                  # magnitude: design for an Mw event | relative: margin_db
+  magnitude: 0.0                   # EDIT: smallest event to locate (Mw)
+  snr_threshold_db: 10.0           # 50% picking probability at this SNR
+  margin_db: 20.0                  # relative mode: smaller = smaller events (5-10 dB: near threshold)
   sites: {}                        # EDIT: borehole sites, e.g. {BH01: borehole, BH02: borehole}
-  site_types:                      # relative values; replace with measurements if available
-    surface: {kappa_s: 0.03, amplification: 2.0, noise_db: 0.0}
-    borehole: {kappa_s: 0.005, amplification: 1.0, noise_db: -20.0}
+  site_types:                      # replace with measurements if available
+    # noise_psd_db: acceleration PSD in the band, dB rel. 1 (m/s^2)^2/Hz (NLNM ~ -168, NHNM ~ -91)
+    surface: {kappa_s: 0.03, amplification: 2.0, noise_db: 0.0, noise_psd_db: -130.0}   # EDIT
+    borehole: {kappa_s: 0.005, amplification: 1.0, noise_db: -20.0, noise_psd_db: -150.0}
 
 # ---------------------------------------------------------------- network design
 design:
   fixed: []                        # EDIT: existing stations that must be kept, e.g. [ST01, ST02]
   exclude: []                      # candidates not to use
   n_max: null                      # largest network to consider (default: all candidates)
+  min_separation_km: 0.0           # e.g. 0.5: no two chosen stations within 500 m
+  min_located_fraction: 0.9        # detection: share of design events (>= 4 picks, >= 1 P) a
+                                   # network must locate; a warning if no size reaches it
   criterion: rms                   # rms 3D error | percentile (worst part of target) | logdet
   vertical_weight: 1.0             # >1 to favour depth accuracy
   target_m: null                   # EDIT (optional): accuracy goal in m; recommends the smallest

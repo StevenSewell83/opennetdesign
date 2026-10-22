@@ -157,19 +157,8 @@ def dir_size_mb(*dirs: Path) -> float:
 
 def _target_polygon(
     target: TargetSpec | None, frame: LocalFrame, crs: InputCRS
-) -> FloatArray | None:
-    if target is None:
-        return None
-    (a0, a1), (b0, b1) = target.box(crs)
-    t = np.linspace(0.0, 1.0, 11)
-    aa = np.concatenate(
-        [a0 + t * (a1 - a0), np.full_like(t, a1), a1 - t * (a1 - a0), np.full_like(t, a0)]
-    )
-    bb = np.concatenate(
-        [np.full_like(t, b0), b0 + t * (b1 - b0), np.full_like(t, b1), b1 - t * (b1 - b0)]
-    )
-    x, y = frame.to_local(*crs.to_wgs84(aa, bb))
-    return np.stack([x, y], axis=1)
+) -> list[FloatArray]:
+    return [] if target is None else target.polygons(frame, crs)
 
 
 def _grid_rect(geom: GridGeometry, xy: FloatArray, padding: float) -> FloatArray:
@@ -900,9 +889,11 @@ def qc_design(
     out: Path,
     detection: FloatArray | None = None,
     margin_rows: list[dict[str, Any]] | None = None,
+    design_event: str = "",
 ) -> list[Check]:
     """Design checks, criterion and robustness curves, final candidate map and table; with
-    ``detection`` also detectability checks and figures."""
+    ``detection`` also detectability checks and figures. ``design_event`` describes the
+    detection setting (e.g. ``Mw 0.5``)."""
     qdir = out / "qc"
     d = ev.spec
     label = {
@@ -1117,7 +1108,7 @@ def qc_design(
                 "pass" if cover >= spec.min_detection_coverage else "warn",
                 round(cover, 3),
                 f">= {spec.min_detection_coverage} with >= {need['P']:g} P, >= {need['S']:g} S",
-                "relative detectability at detection.margin_db",
+                f"detection at {design_event}",
             )
         )
         if margin_rows:
@@ -1125,11 +1116,11 @@ def qc_design(
             checks.append(
                 Check(
                     "design",
-                    "recommended size stable across detection margins",
+                    "recommended size stable across design event sizes",
                     "pass" if len(ns_m) == 1 else "info",
                     sorted(ns_m),
                     "one size",
-                    "see the margin sensitivity table",
+                    "see the event-size sensitivity table",
                 )
             )
 

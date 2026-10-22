@@ -25,6 +25,7 @@ from netdesign.design import DesignResult, Evaluator, optimise
 from netdesign.detection import profiles_from_outputs, relative_detection
 from netdesign.errors import ConfigError
 from netdesign.frame import GridGeometry, LocalFrame, grid_geometry
+from netdesign.gis import export_gis
 from netdesign.nll import Phase, TimeGridSet, VelGridSet, build_time_grids, build_vel_grids
 from netdesign.nll.grid2time import time_grids
 from netdesign.nll.vel2grid import model_grids
@@ -472,29 +473,36 @@ def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
         xyz, profiles, eta, fref, usable = _detection_inputs(cfg, out, sens)
         det, _ = relative_detection(sens, xyz, profiles, eta, fref, cfg.detection, usable)
     ev = Evaluator(sens, cfg.picks, cfg.design, det)
-    result = optimise(ev, sens.stations, cfg.design, np.random.default_rng(cfg.design.seed))
+    sta_xyz = _station_xyz(out, sens)
+    result = optimise(
+        ev, sens.stations, cfg.design, np.random.default_rng(cfg.design.seed), sta_xyz
+    )
     if cfg.detection.enabled:
-        # How much does the "how small an event" knob change the answer?
+        # How much does the "how small an event" knob (margin or magnitude) change the answer?
         quick = cfg.design.model_copy(update={"n_random": 0})
-        for margin in sorted({*cfg.detection.margin_sensitivity_db, cfg.detection.margin_db}):
-            if margin == cfg.detection.margin_db:
+        key, values, design_value = cfg.detection.sensitivity_values
+        for value in values:
+            if value == design_value:
                 res = result
             else:
                 det_m, _ = relative_detection(
-                    sens, xyz, profiles, eta, fref, cfg.detection, usable, margin_db=margin
+                    sens, xyz, profiles, eta, fref, cfg.detection, usable, **{key: value}
                 )
                 res = optimise(
                     Evaluator(sens, cfg.picks, quick, det_m),
                     sens.stations,
                     quick,
                     np.random.default_rng(cfg.design.seed),
+                    sta_xyz,
                 )
             rec_m = res.networks[res.recommended_n]
             margin_rows.append(
                 {
-                    "margin_db": margin,
+                    key: value,
                     "recommended_n": res.recommended_n,
                     "criterion_m": round(rec_m.criterion_m, 1),
+                    "located_fraction": round(rec_m.located_fraction, 3),
+                    "meets_located_fraction": rec_m.meets_located,
                     "stations": " ".join(sens.stations[i] for i in rec_m.stations),
                 }
             )
@@ -518,9 +526,23 @@ def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
                 "criterion_if_station_lost_m": {
                     names[k]: v for k, v in r.loss_one_station_m.items()
                 },
+                "located_fraction": r.located_fraction,
+                "meets_located_fraction": r.meets_located,
+                "located_fraction_if_station_lost": {
+                    names[k]: v for k, v in r.loss_located_fraction.items()
+                },
             }
         )
     rec = result.networks[result.recommended_n]
+    locating = cfg.detection.enabled and cfg.design.locatability
+    warnings = []
+    if not rec.meets_located:
+        warnings.append(
+            f"the recommended network locates only {100 * rec.located_fraction:.0f}% of the "
+            f"design events (needs {100 * cfg.design.min_located_fraction:.0f}%): the design "
+            "event is too small for these candidates; use a larger detection.magnitude "
+            "(or margin), quieter sites, or more candidates near the target"
+        )
     (ddir / "design.json").write_text(
         json.dumps(
             {
@@ -532,6 +554,9 @@ def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
                 "greedy_order": [names[s] for s in result.greedy_order],
                 "networks": nets,
                 "notes": result.notes,
+                "warnings": warnings,
+                "recommendation_reliable": not warnings,
+                "min_located_fraction": cfg.design.min_located_fraction if locating else None,
                 "detection": None
                 if not cfg.detection.enabled
                 else {
@@ -542,8 +567,9 @@ def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
             indent=2,
         )
     )
-    lines = ["n,criterion_m,stations"] + [
-        f"{x['n']},{x['criterion_m']:.2f},{' '.join(x['stations'])}" for x in nets
+    lines = ["n,criterion_m,located_fraction,stations"] + [
+        f"{x['n']},{x['criterion_m']:.2f},{x['located_fraction']:.3f},{' '.join(x['stations'])}"
+        for x in nets
     ]
     (ddir / "networks.csv").write_text("\n".join(lines) + "\n")
 
@@ -551,7 +577,15 @@ def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
         candidates = Candidates.read(cfg.stations.candidates, cfg.input_crs)
         frame = _frame(cfg, candidates)
         start = time.perf_counter()
-        qc_design(result, ev, sens, candidates, frame, cfg.target, cfg.qc, out, det, margin_rows)
+        dspec = cfg.detection
+        event = (
+            f"Mw {dspec.magnitude:g} (SNR {dspec.snr_threshold_db:g} dB)"
+            if dspec.mode == "magnitude"
+            else f"relative margin {dspec.margin_db:g} dB"
+        )
+        qc_design(
+            result, ev, sens, candidates, frame, cfg.target, cfg.qc, out, det, margin_rows, event
+        )
         run_record(
             out,
             "design",
@@ -565,13 +599,18 @@ def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
     return result
 
 
+def _station_xyz(out: Path, sens: Sensitivity) -> np.ndarray:
+    """Local station coordinates (S, 3) km, in ``sens.stations`` order."""
+    rows = (out / "stations_local.csv").read_text().splitlines()[1:]
+    xyz = {n: (float(x), float(y), float(z)) for n, x, y, z in (r.split(",") for r in rows)}
+    return np.array([xyz[n] for n in sens.stations])
+
+
 def _detection_inputs(
     cfg: Config, out: Path, sens: Sensitivity
 ) -> tuple[np.ndarray, list[Any], list[float], float, list[int]]:
     """Station coordinates, per-realization profiles, eta, fref and usable candidates."""
-    rows = (out / "stations_local.csv").read_text().splitlines()[1:]
-    xyz = {n: (float(x), float(y), float(z)) for n, x, y, z in (r.split(",") for r in rows)}
-    station_xyz = np.array([xyz[n] for n in sens.stations])
+    station_xyz = _station_xyz(out, sens)
     profiles, eta, fref = profiles_from_outputs(
         out, cfg.velocity.attenuation, cfg.velocity.model_3d, cfg.input_crs
     )
@@ -580,6 +619,16 @@ def _detection_inputs(
     if unknown:
         raise ConfigError(f"detection.sites: unknown station(s) {unknown}")
     return station_xyz, profiles, eta, fref, usable
+
+
+def run_export(cfg: Config, out: Path | None = None) -> list[Path]:
+    """Shapefiles of the candidates, target boxes and design results in ``out/gis`` (see
+    :mod:`netdesign.gis`); exports whatever stages have been run."""
+    out = cfg.output_dir if out is None else out
+    if cfg.stations is None:
+        raise ConfigError("export needs the 'stations' config section")
+    candidates = Candidates.read(cfg.stations.candidates, cfg.input_crs)
+    return export_gis(cfg, _frame(cfg, candidates), out)
 
 
 def check_run(cfg: Config) -> None:

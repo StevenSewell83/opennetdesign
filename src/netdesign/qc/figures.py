@@ -21,6 +21,7 @@ __all__ = [
     "inputs_map",
     "mislocation_vectors",
     "profiles",
+    "sites_map",
     "station_contribution",
     "uncertainty_maps",
     "validation_scatter",
@@ -57,7 +58,7 @@ def inputs_map(
     xy: FloatArray,
     names: Sequence[str],
     elev_m: FloatArray,
-    target: FloatArray | None,
+    target: Sequence[FloatArray],
     grid_rect: FloatArray,
     path: Path,
     dpi: int,
@@ -67,8 +68,8 @@ def inputs_map(
     fig, ax = plt.subplots(figsize=(7, 6))
     sc = ax.scatter(xy[:, 0], xy[:, 1], c=elev_m, cmap=SEQUENTIAL, **STATION_MARKER)
     _label_stations(ax, xy, names)
-    if target is not None:
-        _outline(ax, target, "target volume")
+    for i, poly in enumerate(target):
+        _outline(ax, poly, "target volume" if i == 0 else None)
     ax.plot(*np.vstack([grid_rect, grid_rect[:1]]).T, color=GRID_LINE, lw=1.0, label="grid extent")
     fig.colorbar(sc, ax=ax, shrink=0.7, label="station elevation (m)")
     ax.set(xlabel="x (km east)", ylabel="y (km north)", title="Candidate stations")
@@ -254,7 +255,7 @@ def candidate_outcome_map(
     contribution: FloatArray,
     background_xy: FloatArray,
     background_sd: FloatArray,
-    target: FloatArray | None,
+    target: Sequence[FloatArray],
     path: Path,
     dpi: int,
     title: str,
@@ -275,8 +276,8 @@ def candidate_outcome_map(
                 linewidths=0.8,
             )
             ax.clabel(cs, fontsize=7, fmt="%.0f m")
-    if target is not None:
-        _outline(ax, target, "target volume")
+    for i, poly in enumerate(target):
+        _outline(ax, poly, "target volume" if i == 0 else None)
     sc = ax.scatter(xy[:, 0], xy[:, 1], c=contribution, cmap=SEQUENTIAL, **STATION_MARKER)
     _label_stations(ax, xy, names)
     fig.colorbar(
@@ -428,7 +429,7 @@ def design_map(
     gain_pct: Sequence[float | None],
     background_xy: FloatArray,
     background_sd: FloatArray,
-    target: FloatArray | None,
+    target: Sequence[FloatArray],
     path: Path,
     dpi: int,
     title: str,
@@ -449,8 +450,8 @@ def design_map(
                 linewidths=0.8,
             )
             ax.clabel(cs, fontsize=7, fmt="%.0f m")
-    if target is not None:
-        _outline(ax, target, "target volume")
+    for i, poly in enumerate(target):
+        _outline(ax, poly, "target volume" if i == 0 else None)
     st = np.array(status)
     styles = {
         "selected": {"c": SERIES[0], "label": "selected (rank: 1 = most important)"},
@@ -501,4 +502,31 @@ def detection_by_station(
         title="Relative detectability by station",
     )
     ax.legend(loc="lower right")
+    return _save(fig, path, dpi)
+
+
+def sites_map(
+    xy: FloatArray,
+    elev_m: FloatArray,
+    keep: npt.NDArray[np.bool_],
+    dem_xy: tuple[FloatArray, FloatArray],
+    dem_z: FloatArray,
+    path: Path,
+    dpi: int,
+) -> Path:
+    """Generated candidate sites (coloured by elevation) over DEM contours; dropped sites
+    (no DEM data or too low) as crosses."""
+    apply_style()
+    fig, ax = plt.subplots(figsize=(7, 6))
+    if np.isfinite(dem_z).any():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # no contours in a flat DEM
+            ax.contour(*dem_xy, dem_z, levels=15, colors=GRID_LINE, linewidths=0.5)
+    sc = ax.scatter(xy[keep, 0], xy[keep, 1], c=elev_m[keep], cmap=SEQUENTIAL, **STATION_MARKER)
+    if (~keep).any():
+        ax.scatter(*xy[~keep].T, marker="x", color=TEXT_MUTED, label="dropped")
+        ax.legend(loc="upper right")
+    fig.colorbar(sc, ax=ax, shrink=0.7, label="site elevation (m)")
+    ax.set(xlabel="x (km east)", ylabel="y (km north)", title="Generated candidate sites")
+    ax.set_aspect("equal")
     return _save(fig, path, dpi)

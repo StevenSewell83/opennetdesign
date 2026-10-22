@@ -29,25 +29,56 @@ exchange (swap one selected for one unselected station while the criterion impro
 from ``n_restarts`` random starts, keeping the best. ``n_random`` random networks per size
 give a baseline, and every best network is scored with each single station removed
 (robustness to one station failing).
+
+Locatability (with detection)
+-----------------------------
+With detection probabilities, an event is only located if it gets at least
+``locate_min_picks`` picks including ``locate_min_p_picks`` P picks. ``L_j``, the probability
+of that at target point ``j``, follows exactly from the stations' independent pick
+probabilities (a capped count distribution). The criterion is then taken over located events
+(point weights ``w_j L_j``), and the located fraction ``F = sum_j w_j L_j`` must reach
+``min_located_fraction``: networks below it score ``PENALTY_M * (1 + gap)``, so the search
+raises coverage first, and only sizes that reach it can be recommended. This stops the
+averaged-information approximation (valid when picks are likely) from being optimised where
+most picks are unlikely, e.g. by stacking neighbouring stations with small pick chances.
+``locatability: false`` restores the plain averaged-information criterion.
+
+With ``min_separation_km`` > 0, no chosen station may be within that horizontal distance of
+another (``fixed`` stations are exempt among themselves): the greedy step, exchanges, restart
+starts and random baselines all respect it, and sizes no feasible network reaches are skipped.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Self
 
+import numba
 import numpy as np
 import numpy.typing as npt
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from netdesign._score import point_scores
 from netdesign.errors import ConfigError
 from netdesign.information import PickSpec, achievable_stats, station_stats
 from netdesign.sensitivity import Sensitivity
 
-__all__ = ["DesignResult", "DesignSpec", "Evaluator", "NetworkResult", "optimise"]
+__all__ = [
+    "DesignResult",
+    "DesignSpec",
+    "Evaluator",
+    "NetworkResult",
+    "optimise",
+    "separation_conflicts",
+]
 
 FloatArray = npt.NDArray[np.float64]
+IntArray = npt.NDArray[np.intp]
+
+PENALTY_M = 1e9
+"""Score of networks that locate too few design events (plus the shortfall)."""
 
 
 class DesignSpec(BaseModel):
@@ -71,6 +102,18 @@ class DesignSpec(BaseModel):
     seed: int = 0
     target_m: float | None = Field(None, gt=0, description="recommend smallest n meeting it")
     min_gain_pct: float = Field(5.0, ge=0, description="knee: stop when a station adds less")
+    min_separation_km: float = Field(
+        0.0, ge=0, description="chosen stations must be farther apart than this (horizontal)"
+    )
+    locatability: bool = Field(True, description="with detection: score located events only")
+    locate_min_picks: int = Field(4, ge=1, description="picks an event needs to be located")
+    locate_min_p_picks: int = Field(1, ge=0, description="of which at least this many P")
+    min_located_fraction: float = Field(
+        0.9, ge=0, le=1, description="share of design events a network must locate"
+    )
+    jobs: int = Field(
+        default_factory=lambda: os.cpu_count() or 1, ge=1, description="threads for the search"
+    )
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -79,6 +122,8 @@ class DesignSpec(BaseModel):
             raise ConfigError(f"design: stations both fixed and excluded: {sorted(both)}")
         if self.n_min and self.n_max and self.n_min > self.n_max:
             raise ConfigError("design.n_min must be <= design.n_max")
+        if self.locate_min_p_picks > self.locate_min_picks:
+            raise ConfigError("design.locate_min_p_picks must be <= locate_min_picks")
         return self
 
 
@@ -106,7 +151,122 @@ class Evaluator:
             self.B = None if gs.B is None else gs.B[0]
             self.M = None if gs.M is None else gs.M[0]
             self.C = None
+        self.A = np.ascontiguousarray(self.A, dtype=np.float64)
+        self.B, self.M, self.C = (
+            None if x is None else np.ascontiguousarray(x, dtype=np.float64)
+            for x in (self.B, self.M, self.C)
+        )
         self.n_stations = self.A.shape[0]
+        # pick probabilities (S, J, P) for locatability; None: every event is located
+        self.pick_p: FloatArray | None = None
+        self.is_p = np.array([p == "P" for p in sens.phases], dtype=np.bool_)
+        if detection is not None and spec.locatability:
+            mean = np.asarray(detection, dtype=np.float64).mean(axis=0)  # (S, P, J)
+            self.pick_p = np.ascontiguousarray(mean.transpose(0, 2, 1))
+
+    def located_probability(self, stations: Sequence[int]) -> FloatArray:
+        """``L_j`` (J,): probability that an event at each point is located by the network
+        (numpy reference for the compiled kernel); ones without locatability."""
+        n_j = len(self.weights)
+        if self.pick_p is None:
+            return np.ones(n_j)
+        k, a = self.spec.locate_min_picks, self.spec.locate_min_p_picks
+        dist = {True: np.zeros((n_j, k + 1)), False: np.zeros((n_j, k + 1))}
+        for d in dist.values():
+            d[:, 0] = 1.0
+        for s in stations:
+            for ph, is_p in enumerate(self.is_p):
+                d, p = dist[bool(is_p)], self.pick_p[s, :, ph]
+                new = d * (1 - p)[:, None]
+                new[:, 1:] += d[:, :-1] * p[:, None]
+                new[:, k] += d[:, k] * p  # "k or more" stays there
+                dist[bool(is_p)] = new
+        tail_s = np.cumsum(dist[False][:, ::-1], axis=1)[:, ::-1]  # P(S picks >= m)
+        return np.sum(
+            [dist[True][:, i] * (tail_s[:, k - i] if i < k else 1.0) for i in range(a, k + 1)],
+            axis=0,
+        )
+
+    def penalised(self, metric: FloatArray, located: FloatArray) -> FloatArray:
+        """Search score: ``metric`` where the located fraction reaches
+        ``min_located_fraction``, else ``PENALTY_M * (1 + shortfall)``."""
+        if self.pick_p is None:
+            return metric
+        gap = self.spec.min_located_fraction - located
+        return np.where(gap <= 1e-12, metric, PENALTY_M * (1 + gap))
+
+    def _zero_sums(self) -> tuple[FloatArray, ...]:
+        return tuple(
+            np.zeros(x.shape[1:]) for x in (self.A, self.B, self.M, self.C) if x is not None
+        )
+
+    def evaluate_batch(
+        self, base: Sequence[int], add: npt.ArrayLike, sub: npt.ArrayLike | None = None
+    ) -> tuple[FloatArray, FloatArray]:
+        """Criteria (m, over located events) and located fractions of many networks at once:
+        ``base`` plus the stations in each row of ``add`` minus those in the same row of
+        ``sub`` (rows padded with -1). Compiled and multithreaded (``design.jobs``); equal
+        to :meth:`evaluate` of each network."""
+        add_a = np.asarray(add, dtype=np.intp)
+        if add_a.ndim == 1:
+            add_a = add_a[:, None]
+        n = add_a.shape[0]
+        sub_a = np.full((n, 0), -1, np.intp) if sub is None else np.asarray(sub, dtype=np.intp)
+        if sub_a.ndim == 1:
+            sub_a = sub_a[:, None]
+        sums = self.sums(base) if len(base) else self._zero_sums()
+        gls = self.spec.measure == "gls"
+        extra = self.M if gls else self.C
+        base_t = (sums[0], None if self.B is None else sums[1], None if extra is None else sums[-1])
+        numba.set_num_threads(min(self.spec.jobs, numba.config.NUMBA_NUM_THREADS))  # type: ignore[attr-defined]
+        spec = self.spec
+        locate = None
+        if self.pick_p is not None:
+            locate = (
+                self.pick_p,
+                self.is_p,
+                np.asarray(list(base), dtype=np.intp),
+                spec.locate_min_picks,
+                spec.locate_min_p_picks,
+            )
+        raw, frac, located = point_scores(
+            base_t,
+            (self.A, self.B, extra),
+            add_a,
+            sub_a,
+            self.prior,
+            self.weights,
+            spec.vertical_weight,
+            gls,
+            spec.criterion,
+            locate,
+        )
+        norm = frac if self.pick_p is not None else np.ones_like(frac)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            if spec.criterion == "rms":
+                metric = np.sqrt(raw / norm) * 1000
+            elif spec.criterion == "logdet":
+                metric = np.exp(raw / norm / 6) * 1000
+            else:
+                assert located is not None
+                metric = np.array(
+                    [
+                        weighted_percentile(
+                            np.sqrt(np.maximum(e, 0)), self.weights * l_, spec.percentile
+                        )
+                        if np.sum(self.weights * l_) > 0
+                        else np.inf
+                        for e, l_ in zip(raw, located, strict=True)
+                    ]
+                )
+        metric = np.where(np.isfinite(metric), metric, np.inf)
+        return metric, frac
+
+    def score_batch(
+        self, base: Sequence[int], add: npt.ArrayLike, sub: npt.ArrayLike | None = None
+    ) -> FloatArray:
+        """Search scores of many networks (see :meth:`evaluate_batch`, :meth:`penalised`)."""
+        return self.penalised(*self.evaluate_batch(base, add, sub))
 
     def sums(self, stations: Sequence[int]) -> tuple[FloatArray, ...]:
         """Summed statistics of a network (A, then B, M, C as available)."""
@@ -146,26 +306,41 @@ class Evaluator:
         result: FloatArray = np.asarray(np.linalg.inv(a), dtype=np.float64)
         return result
 
-    def criterion_from_cov(self, cov: FloatArray) -> float:
-        """Criterion (m) from covariance matrices (J, 4, 4)."""
+    def criterion_from_cov(self, cov: FloatArray, located: FloatArray | None = None) -> float:
+        """Criterion (m) from covariance matrices (J, 4, 4), over located events when
+        ``located`` (``L_j``) is given."""
         spec = self.spec
+        w = self.weights if located is None else self.weights * located
+        if located is not None and not np.sum(w) > 0:
+            return float("inf")
+        norm = 1.0 if located is None else float(np.sum(w))
         var = np.diagonal(cov, axis1=-2, axis2=-1)
         e = var[:, 0] + var[:, 1] + spec.vertical_weight * var[:, 2]
         if spec.criterion == "rms":
-            return float(np.sqrt(np.sum(self.weights * e)) * 1000)
+            return float(np.sqrt(np.sum(w * e) / norm) * 1000)
         if spec.criterion == "percentile":
-            return weighted_percentile(np.sqrt(np.maximum(e, 0)), self.weights, spec.percentile)
+            return weighted_percentile(np.sqrt(np.maximum(e, 0)), w, spec.percentile)
         sign, logdet = np.linalg.slogdet(cov[:, :3, :3])
         logdet = np.where(sign > 0, logdet, np.inf)
-        return float(np.exp(np.sum(self.weights * logdet) / 6) * 1000)
+        use = w > 0
+        return float(np.exp(np.sum(w[use] * logdet[use]) / norm / 6) * 1000)
 
     def score_sums(self, sums: tuple[FloatArray, ...]) -> float:
-        """Criterion of the network with these summed statistics."""
+        """Criterion of the network with these summed statistics (every event located)."""
         return self.criterion_from_cov(self.covariance(sums))
 
+    def evaluate(self, stations: Sequence[int]) -> tuple[float, float]:
+        """Criterion (m, over located events) and located fraction of a network."""
+        located = self.located_probability(stations)
+        cov = self.covariance(self.sums(stations))
+        if self.pick_p is None:
+            return self.criterion_from_cov(cov), 1.0
+        return self.criterion_from_cov(cov, located), float(np.sum(self.weights * located))
+
     def score(self, stations: Sequence[int]) -> float:
-        """Criterion of a network given by station indices."""
-        return self.score_sums(self.sums(stations))
+        """Search score of a network given by station indices (numpy reference)."""
+        metric, frac = self.evaluate(stations)
+        return float(self.penalised(np.array([metric]), np.array([frac]))[0])
 
 
 def weighted_percentile(values: FloatArray, weights: FloatArray, q: float) -> float:
@@ -188,6 +363,9 @@ class NetworkResult:
     random_percentiles_m: tuple[float, float, float] | None  # 5th, 50th, 95th
     fraction_random_better: float | None
     loss_one_station_m: dict[int, float]  # station removed -> criterion
+    located_fraction: float = 1.0  # share of design events located (1 without detection)
+    meets_located: bool = True  # located_fraction >= min_located_fraction
+    loss_located_fraction: dict[int, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -203,39 +381,92 @@ class DesignResult:
     notes: list[str] = field(default_factory=list)
 
 
-def _add(a: tuple[FloatArray, ...], b: tuple[FloatArray, ...]) -> tuple[FloatArray, ...]:
-    return tuple(x + y for x, y in zip(a, b, strict=True))
+BoolArray = npt.NDArray[np.bool_]
 
 
-def _sub(a: tuple[FloatArray, ...], b: tuple[FloatArray, ...]) -> tuple[FloatArray, ...]:
-    return tuple(x - y for x, y in zip(a, b, strict=True))
-
-
-def _exchange(ev: Evaluator, start: list[int], usable: list[int], fixed: set[int]) -> list[int]:
-    """Best-improvement swaps until no swap improves the criterion."""
+def _exchange(
+    ev: Evaluator,
+    start: list[int],
+    usable: list[int],
+    fixed: set[int],
+    conflict: BoolArray | None = None,
+) -> list[int]:
+    """Best-improvement swaps until no swap improves the criterion. Each pass scores every
+    allowed (selected, unselected) swap in one batch; the first best swap in (out, in) order
+    wins. With ``conflict`` (S, S), an incoming station may not conflict with any station
+    that stays."""
     current = list(start)
-    sums = ev.sums(current)
-    best = ev.score_sums(sums)
-    terms = {s: ev.station_terms(s) for s in usable}
+    best = float(ev.score_batch(current, np.full((1, 0), -1))[0])
     while True:
-        move, move_score = None, best
-        for out_s in [s for s in current if s not in fixed]:
-            without = _sub(sums, terms[out_s])
-            for in_s in [s for s in usable if s not in current]:
-                score = ev.score_sums(_add(without, terms[in_s]))
-                if score < move_score * (1 - 1e-9):
-                    move, move_score = (out_s, in_s), score
-        if move is None:
+        outs = [s for s in current if s not in fixed]
+        ins = np.array([s for s in usable if s not in current], dtype=np.intp)
+        if not outs or not len(ins):
             return current
-        current = [move[1] if s == move[0] else s for s in current]
-        sums = _add(_sub(sums, terms[move[0]]), terms[move[1]])
-        best = move_score
+        if conflict is None:
+            add = np.tile(ins, len(outs))
+            sub = np.repeat(outs, len(ins))
+        else:
+            hits = conflict[np.ix_(ins, np.asarray(current, dtype=np.intp))]  # (m, n)
+            count = hits.sum(axis=1)
+            pos = {s: k for k, s in enumerate(current)}
+            allowed = [ins[count - hits[:, pos[o]] == 0] for o in outs]
+            add = np.concatenate(allowed)
+            sub = np.repeat(outs, [len(a) for a in allowed])
+            if not len(add):
+                return current
+        scores = ev.score_batch(current, add, sub)
+        i = int(np.argmin(scores))
+        if not scores[i] < best * (1 - 1e-9):
+            return current
+        current = [int(add[i]) if s == sub[i] else s for s in current]
+        best = float(scores[i])
+
+
+def _random_network(
+    rng: np.random.Generator,
+    free: list[int],
+    k: int,
+    chosen: list[int],
+    conflict: BoolArray | None,
+) -> list[int] | None:
+    """``k`` random stations from ``free`` to add to ``chosen``; with ``conflict``, drawn one
+    at a time among those still allowed (None if fewer than ``k`` fit)."""
+    if conflict is None:
+        return [int(s) for s in rng.choice(free, size=k, replace=False)]
+    blocked: BoolArray = np.zeros(len(conflict), dtype=bool)
+    if chosen:
+        blocked = np.asarray(conflict[chosen].any(axis=0))
+    picked: list[int] = []
+    for s in rng.permutation(free):
+        if len(picked) == k:
+            break
+        if not blocked[s]:
+            picked.append(int(s))
+            blocked = blocked | conflict[s]
+    return picked if len(picked) == k else None
+
+
+def separation_conflicts(xy: npt.ArrayLike, min_separation_km: float) -> BoolArray | None:
+    """(S, S) True where two stations are within ``min_separation_km`` horizontally (1 m
+    tolerance, so grid neighbours exactly that far apart conflict); None if it is 0."""
+    if min_separation_km <= 0:
+        return None
+    p = np.asarray(xy, dtype=np.float64)[:, :2]
+    d = np.linalg.norm(p[:, None] - p[None], axis=-1)
+    out: BoolArray = d <= min_separation_km + 1e-3
+    np.fill_diagonal(out, False)
+    return out
 
 
 def optimise(
-    ev: Evaluator, names: Sequence[str], spec: DesignSpec, rng: np.random.Generator
+    ev: Evaluator,
+    names: Sequence[str],
+    spec: DesignSpec,
+    rng: np.random.Generator,
+    xy: npt.ArrayLike | None = None,
 ) -> DesignResult:
-    """Run the search described in the module docstring.
+    """Run the search described in the module docstring. ``xy`` (S, 2+) are the stations'
+    local coordinates in km, needed for ``min_separation_km``.
 
     Raises
     ------
@@ -254,83 +485,117 @@ def optimise(
     if n_min > n_max:
         raise ConfigError(f"design: n_min {n_min} > usable stations {n_max}")
     notes: list[str] = []
+    conflict = None
+    if spec.min_separation_km > 0:
+        if xy is None:
+            raise ConfigError("design.min_separation_km needs the station coordinates")
+        conflict = separation_conflicts(xy, spec.min_separation_km)
 
     # Greedy forward selection: a nested order over all usable candidates.
     order = list(fixed)
-    sums = ev.sums(order) if order else None
-    terms = {s: ev.station_terms(s) for s in usable}
-    greedy_score: dict[int, float] = {}
     while len(order) < n_max:
-        best_s, best_score = None, np.inf
-        for s in usable:
-            if s in order:
-                continue
-            trial = terms[s] if sums is None else _add(sums, terms[s])
-            score = ev.score_sums(trial)
-            if score < best_score:
-                best_s, best_score = s, score
-        assert best_s is not None
-        order.append(best_s)
-        sums = terms[best_s] if sums is None else _add(sums, terms[best_s])
-        greedy_score[len(order)] = best_score
-    for n in range(1, len(fixed) + 1):
-        greedy_score.setdefault(n, ev.score(order[:n]))
+        trial = [s for s in usable if s not in order]
+        if conflict is not None:
+            blocked: BoolArray = np.zeros(len(names), dtype=bool)
+            if order:
+                blocked = np.asarray(conflict[order].any(axis=0))
+            trial = [s for s in trial if not blocked[s]]
+            if not trial:
+                if len(order) < n_min:
+                    raise ConfigError(
+                        f"design: only {len(order)} stations fit at min_separation_km "
+                        f"{spec.min_separation_km:g}, fewer than n_min {n_min}"
+                    )
+                notes.append(
+                    f"only {len(order)} stations fit at min_separation_km "
+                    f"{spec.min_separation_km:g}; larger sizes skipped"
+                )
+                break
+        scores = ev.score_batch(order, trial)
+        i = int(np.argmin(scores))
+        order.append(trial[i])
 
     networks: dict[int, NetworkResult] = {}
     fixed_set = set(fixed)
     free = [s for s in usable if s not in fixed_set]
-    for n in range(n_min, n_max + 1):
+    for n in range(n_min, len(order) + 1):
         start = order[:n]
-        best = _exchange(ev, start, usable, fixed_set) if spec.exchange else list(start)
-        best_score = ev.score(best)
+        best = _exchange(ev, start, usable, fixed_set, conflict) if spec.exchange else list(start)
         candidates = [best]
         if spec.exchange and n - len(fixed) > 0 and n < len(usable):
             for _ in range(spec.n_restarts):
-                pick = list(rng.choice(free, size=n - len(fixed), replace=False))
-                candidates.append(_exchange(ev, fixed + [int(s) for s in pick], usable, fixed_set))
-        scores = [ev.score(c) for c in candidates]
+                pick = _random_network(rng, free, n - len(fixed), fixed, conflict)
+                if pick is not None:
+                    candidates.append(_exchange(ev, fixed + pick, usable, fixed_set, conflict))
+        scores = ev.score_batch([], candidates)
         i_best = int(np.argmin(scores))
-        best, best_score = candidates[i_best], scores[i_best]
+        best, best_score = candidates[i_best], float(scores[i_best])
         reached = int(np.sum(np.isclose(scores, best_score, rtol=1e-6)))
         if scores[0] > best_score * (1 + 1e-6):
             notes.append(f"n={n}: a random restart beat the greedy+exchange network")
 
         rand_pct, frac_better = None, None
         if spec.n_random and n - len(fixed) > 0 and n < len(usable):
-            rs = [
-                ev.score(
-                    fixed + [int(s) for s in rng.choice(free, size=n - len(fixed), replace=False)]
-                )
+            draws = [
+                _random_network(rng, free, n - len(fixed), fixed, conflict)
                 for _ in range(spec.n_random)
             ]
-            p5, p50, p95 = np.percentile(rs, [5, 50, 95])
-            rand_pct = (float(p5), float(p50), float(p95))
-            frac_better = float(np.mean(np.array(rs) < best_score * (1 - 1e-9)))
+            nets = [fixed + d for d in draws if d is not None]
+            if nets:
+                r_metric, r_frac = ev.evaluate_batch([], nets)
+                p5, p50, p95 = np.percentile(r_metric, [5, 50, 95])
+                rand_pct = (float(p5), float(p50), float(p95))
+                rs = ev.penalised(r_metric, r_frac)
+                frac_better = float(np.mean(rs < best_score * (1 - 1e-9)))
 
-        loss = {s: ev.score([t for t in best if t != s]) for s in best if n > 1}
+        # Report the criterion over located events and the located fraction (the search
+        # score adds the shortfall penalty).
+        (metric,), (located,) = ev.evaluate_batch([], [best])
+        (g_metric,), _ = ev.evaluate_batch([], [order[:n]])
+        loss: dict[int, float] = {}
+        loss_frac: dict[int, float] = {}
+        if n > 1:
+            l_metric, l_frac = ev.evaluate_batch(best, np.full((n, 0), -1), best)
+            loss = {s: float(v) for s, v in zip(best, l_metric, strict=True)}
+            loss_frac = {s: float(v) for s, v in zip(best, l_frac, strict=True)}
         networks[n] = NetworkResult(
             n,
             tuple(sorted(best)),
-            best_score,
-            greedy_score[n],
+            float(metric),
+            float(g_metric),
             reached,
             rand_pct,
             frac_better,
             loss,
+            float(located),
+            bool(best_score < PENALTY_M),
+            loss_frac,
         )
 
-    all_score = ev.score(usable)
+    all_score = float(ev.evaluate_batch([], [usable])[0][0])
     recommended = _recommend(networks, spec, all_score)
+    if not networks[recommended].meets_located:
+        best_n = max(networks, key=lambda k: networks[k].located_fraction)
+        notes.append(
+            f"no network up to {max(networks)} stations locates "
+            f"{100 * spec.min_located_fraction:.0f}% of the design events (best "
+            f"{100 * networks[best_n].located_fraction:.0f}% at n={best_n}); the design event "
+            "is too small for these candidates"
+        )
     return DesignResult(order, networks, recommended, usable, fixed, all_score, notes)
 
 
 def _recommend(networks: dict[int, NetworkResult], spec: DesignSpec, all_m: float) -> int:
-    ns = sorted(networks)
+    """Smallest size meeting ``target_m``, else the knee; only sizes that locate enough
+    design events count (the largest size if none does)."""
+    ns = [n for n in sorted(networks) if networks[n].meets_located]
+    if not ns:
+        return max(networks)
     if spec.target_m is not None:
         meeting = [n for n in ns if networks[n].criterion_m <= spec.target_m]
         return meeting[0] if meeting else ns[-1]
     for n in ns[:-1]:
-        nxt = networks[n + 1].criterion_m if n + 1 in networks else all_m
+        nxt = networks[n + 1].criterion_m if n + 1 in ns else all_m
         gain = 100 * (1 - nxt / networks[n].criterion_m)
         if gain < spec.min_gain_pct:
             return n

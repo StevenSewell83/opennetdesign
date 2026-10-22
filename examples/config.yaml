@@ -13,6 +13,21 @@ phases: [P, S]                 # phases to model (grids, travel times)
 stations:
   candidates: candidates.csv   # station,long,lat,z (geographic) | station,easting,northing,z
 
+sites:                         # `netdesign sites`: generate stations.candidates on a grid with DEM z
+  centre: {lat: -38.605, long: 176.13}   # grid centre (always a site); easting/northing if projected
+  spacing_m: 1000.0            # required; site spacing along both grid axes
+  extent_m: [6000.0, 6000.0]   # required; full width across and along the grid axes
+  shape: rectangle             # rectangle | ellipse (inscribed in extent_m)
+  rotation_deg: 0.0            # grid 'north' axis, clockwise from north
+  prefix: G                    # station names G01, G02, ... (row by row from the top)
+  sensor_depth_m: 0.0          # sensor below the DEM surface (z = DEM - sensor_depth_m)
+  min_elevation_m: null        # drop sites lower than this, e.g. 1.0 to drop sea/shore sites
+  dem:
+    source: copernicus30       # copernicus30 | copernicus90 (download, EGM2008 = MSL) | file
+    path: null                 # file: local GeoTIFF (any CRS), metres above sea level
+    cache_dir: dem             # downloaded DEM clips are kept and reused here
+    margin_m: 500.0            # DEM area beyond the outermost site
+
 grid:
   mode: 3d                     # 3d (needed for velocity.heterogeneity) | 2d (layered only, GRID2D)
   dx_km: 0.05                  # cubic cell size
@@ -30,7 +45,17 @@ nll:
 target:                        # where events are expected
   long: [176.11, 176.15]       # or easting: [..] / northing: [..] for a projected crs
   lat: [-38.62, -38.59]
-  depth_km: [0.5, 4.0]         # km below sea level
+  depth_km: [0.5, 4.0]         # km below sea level (default for every box below)
+  # Several boxes instead of long/lat above (each may be ranges or a rotated rectangle):
+  # boxes:
+  #   - name: field              # label only
+  #     centre: {lat: -38.605, long: 176.13}   # or easting/northing (projected crs)
+  #     size_km: [1.0, 3.0]      # [across, along]
+  #     rotation_deg: 45.0       # 'along' axis, clockwise from north
+  #     depth_km: [1.0, 3.0]     # default: target.depth_km
+  #     weight: 2.0              # relative share of events; give for every box or none
+  #                              # (none: shares by volume, i.e. uniform event density)
+  #   - {long: [176.11, 176.12], lat: [-38.62, -38.61], weight: 1.0}
   sampling: grid               # grid | random
   spacing_km: 0.25             # grid: horizontal spacing
   depth_spacing_km: 0.25       # grid: vertical spacing (default: spacing_km)
@@ -76,9 +101,19 @@ design:                        # `netdesign design` (after `sensitivity`)
   seed: 0
   target_m: null               # recommend the smallest network meeting this criterion (m)
   min_gain_pct: 5.0            # otherwise the knee: stop when one more station adds < 5%
+  locatability: true           # with detection: an event counts only if it gets enough picks;
+                               # the criterion is over located events (false: averaged picks)
+  locate_min_picks: 4          # picks an event needs to be located ...
+  locate_min_p_picks: 1        # ... including at least this many P picks
+  min_located_fraction: 0.9    # share of design events a network must locate to be recommended
+  min_separation_km: 0.0       # chosen stations must be farther apart than this (horizontal;
+                               # fixed stations exempt among themselves); 0 = no limit
+  jobs: 8                      # threads for the search (default: number of CPUs)
 
 detection:                     # relative detectability (used by `design`); placeholders
   enabled: true                # default false: every station picks every phase
+  mode: relative               # relative (margin_db below the best sites) | magnitude (absolute
+                               # SNR of an Mw `magnitude` event against noise_psd_db)
   frequency_band_hz: [5.0, 30.0]   # picking band
   n_frequencies: 5
   reference: per_phase         # per_phase: each phase vs its own arrivals | all_phases
@@ -87,11 +122,20 @@ detection:                     # relative detectability (used by `design`); plac
   margin_db: 20.0              # 50% detection this far below the reference arrival
   width_db: 5.0                # transition width (1 sd)
   margin_sensitivity_db: [5.0, 10.0, 15.0]   # extra margins the design is re-run at
+  magnitude: 0.0               # magnitude mode: smallest event to locate (Mw)
+  magnitude_sensitivity: [-0.5, 0.5, 1.0]   # extra magnitudes the design is re-run at
+  stress_drop_mpa: 1.0         # Brune stress drop (sets the corner frequency)
+  density_kg_m3: 2700.0        # at the source
+  radiation: {P: 0.52, S: 0.63}   # average radiation coefficients
+  snr_threshold_db: 10.0       # 50% picking probability at this SNR (width_db sets the spread)
+  signal_window_s: 0.5         # window the signal power is averaged over
   default_site: surface
   sites: {C10: borehole}       # station -> site type
   site_types:                  # relative to each other; literature-style placeholders
-    surface: {kappa_s: 0.03, amplification: 2.0, noise_db: 0.0}
-    borehole: {kappa_s: 0.005, amplification: 1.0, noise_db: -20.0}
+    surface: {kappa_s: 0.03, amplification: 2.0, noise_db: 0.0, noise_psd_db: -130.0}
+    borehole: {kappa_s: 0.005, amplification: 1.0, noise_db: -20.0, noise_psd_db: -150.0}
+    # noise_psd_db (magnitude mode): acceleration PSD in the band, dB rel. 1 (m/s^2)^2/Hz
+    # (Peterson NLNM ~ -168, NHNM ~ -91 at 10 Hz); measure it at the site if possible
 
 qc:                            # checks + figures in <output_dir>/qc, report.html after each stage
   enabled: true

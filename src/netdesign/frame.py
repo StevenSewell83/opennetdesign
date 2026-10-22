@@ -50,11 +50,13 @@ class Origin(BaseModel):
         geo = self.lat is not None and self.long is not None
         proj = self.easting is not None and self.northing is not None
         if geo == proj:
-            raise ConfigError("grid.origin: give either lat and long, or easting and northing")
+            raise ConfigError(
+                "grid.origin / sites.centre: give either lat and long, or easting and northing"
+            )
         return self
 
-    def to_wgs84(self, crs: InputCRS) -> tuple[float, float]:
-        """``(lat, long)`` WGS-84.
+    def to_wgs84(self, crs: InputCRS, where: str = "grid.origin") -> tuple[float, float]:
+        """``(lat, long)`` WGS-84; ``where`` names the config key in error messages.
 
         Raises
         ------
@@ -63,11 +65,11 @@ class Origin(BaseModel):
         """
         if crs.geographic:
             if self.long is None or self.lat is None:
-                raise ConfigError(f"grid.origin: {crs.name} needs lat and long")
+                raise ConfigError(f"{where}: {crs.name} needs lat and long")
             lon, lat = crs.to_wgs84(self.long, self.lat)
         else:
             if self.easting is None or self.northing is None:
-                raise ConfigError(f"grid.origin: {crs.name} needs easting and northing")
+                raise ConfigError(f"{where}: {crs.name} needs easting and northing")
             lon, lat = crs.to_wgs84(self.easting, self.northing)
         return float(lat), float(lon)
 

@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from netdesign.crs import WGS84, InputCRS
 from netdesign.errors import ConfigError
 from netdesign.frame import LocalFrame
 from netdesign.target import TargetSpec, sample_sources
@@ -65,3 +66,78 @@ def test_spacing_larger_than_box() -> None:
     spec = TargetSpec.model_validate({**BOX, "spacing_km": 50.0})
     with pytest.raises(ConfigError, match="no source points"):
         sample_sources(spec, FRAME)
+
+
+def _rotated(**kw: object) -> dict:
+    box = {"centre": {"lat": -38.6, "long": 176.13}, "size_km": [1.0, 2.0], "depth_km": [1, 3]}
+    return box | kw
+
+
+def test_rotated_box_points_inside_and_aligned() -> None:
+    spec = TargetSpec.model_validate(
+        {"boxes": [_rotated(rotation_deg=30.0)], "spacing_km": 0.25, "depth_spacing_km": 0.5}
+    )
+    src = sample_sources(spec, FRAME)
+    assert len(src) == 4 * 8 * 4  # 1 km x 2 km at 0.25 km, 2 km depth at 0.5 km
+    t = np.radians(30.0)
+    u = src.xyz[:, 0] * np.cos(t) - src.xyz[:, 1] * np.sin(t)  # across
+    v = src.xyz[:, 0] * np.sin(t) + src.xyz[:, 1] * np.cos(t)  # along
+    assert np.abs(u).max() < 0.5 and np.abs(v).max() < 1.0
+    np.testing.assert_allclose(np.unique(np.round(v, 6)), np.arange(-0.875, 1.0, 0.25))
+    poly = spec.polygons(FRAME, WGS84)[0]
+    assert poly.shape == (4, 2)
+
+
+def test_boxes_share_events_by_volume_or_weight() -> None:
+    small = _rotated(size_km=[1.0, 1.0])
+    big = _rotated(size_km=[2.0, 2.0], centre={"lat": -38.65, "long": 176.13})
+    by_volume = sample_sources(TargetSpec.model_validate({"boxes": [small, big]}), FRAME)
+    near = by_volume.xyz[:, 1] > -2.5
+    assert by_volume.weights[near].sum() == pytest.approx(0.2)  # 1 : 4 in area
+    weighted = TargetSpec.model_validate(
+        {"boxes": [small | {"weight": 3.0}, big | {"weight": 1.0}]}
+    )
+    src = sample_sources(weighted, FRAME)
+    assert src.weights[src.xyz[:, 1] > -2.5].sum() == pytest.approx(0.75)
+
+
+def test_boxes_mix_ranges_and_default_depth() -> None:
+    spec = TargetSpec.model_validate(
+        {
+            "boxes": [{"long": [176.11, 176.12], "lat": [-38.62, -38.61]}, _rotated()],
+            "depth_km": [0.5, 1.5],
+            "sampling": "random",
+            "n_points": 300,
+        }
+    )
+    src = sample_sources(spec, FRAME)
+    assert abs(len(src) - 300) <= 2
+    assert src.xyz[:, 2].max() <= 3.0 and src.xyz[:, 2].min() >= 0.5
+    assert len(spec.polygons(FRAME, WGS84)) == 2
+
+
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        ({**BOX, "boxes": [_rotated()]}, "either one box"),
+        ({"boxes": [_rotated(depth_km=None)]}, "depth_km"),
+        ({"boxes": [_rotated(weight=1.0), _rotated()]}, "weight for every box"),
+        (
+            {
+                "boxes": [{"long": [176.1, 176.2], "lat": [-38.7, -38.6], "rotation_deg": 10}],
+                "depth_km": [1, 2],
+            },
+            "rotation_deg",
+        ),
+        ({"boxes": [_rotated(size_km=None)]}, "centre and size_km"),
+    ],
+)
+def test_bad_boxes(raw: dict, match: str) -> None:
+    with pytest.raises(ConfigError, match=match):
+        TargetSpec.model_validate(raw)
+
+
+def test_box_crs_checked() -> None:
+    spec = TargetSpec.model_validate({"boxes": [_rotated()]})
+    with pytest.raises(ConfigError, match=r"boxes\[0\]\.centre"):
+        spec.check_crs(InputCRS(2193))

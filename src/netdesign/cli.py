@@ -8,22 +8,26 @@ import time
 from pathlib import Path
 from typing import Annotated
 
+import numpy as np
 import typer
 
 from netdesign.config import Config, load_config
 from netdesign.design import DesignResult
-from netdesign.errors import NetDesignError
+from netdesign.errors import ConfigError, NetDesignError
 from netdesign.pipeline import (
     check_run,
     run_design,
     run_ensemble,
+    run_export,
     run_sensitivity,
     run_traveltimes,
     run_validate,
     run_vel_grids,
 )
+from netdesign.qc.figures import sites_map
 from netdesign.qc.report import build_report
 from netdesign.sensitivity import Sensitivity
+from netdesign.sites import build_sites
 from netdesign.validate import ValidationResult
 
 app = typer.Typer(no_args_is_help=True, help="Microseismic network design.")
@@ -97,6 +101,66 @@ def report(config: ConfigArg, out: OutOpt = None) -> None:
     typer.echo(f"report: {path}")
 
 
+@app.command()
+def sites(
+    config: ConfigArg,
+    out: OutOpt = None,
+    force: Annotated[
+        bool, typer.Option("--force", "-f", help="overwrite an existing candidates file")
+    ] = False,
+) -> None:
+    """Generate the candidate grid (`sites`) with DEM elevations; writes stations.candidates.
+
+    Map of the sites in <output_dir>/qc/sites_map.png.
+    """
+    try:
+        cfg = load_config(config)
+        if cfg.sites is None or cfg.stations is None:
+            raise ConfigError("`netdesign sites` needs the 'sites' and 'stations' sections")
+        result = build_sites(cfg.sites, cfg.input_crs, cfg.stations.candidates, force)
+    except NetDesignError as exc:
+        raise _fail(exc) from exc
+    g = result.grid
+    xy = np.column_stack([g.x_km, g.y_km])
+    pad = cfg.sites.dem.margin_m / 1000.0
+    ex = np.linspace(g.x_km.min() - pad, g.x_km.max() + pad, 200)
+    ey = np.linspace(g.y_km.min() - pad, g.y_km.max() + pad, 200)
+    gx, gy = np.meshgrid(ex, ey)
+    dem_z = result.dem.sample(*g.frame.to_geographic(gx, gy))
+    fig = sites_map(
+        xy,
+        result.elev_m,
+        result.keep,
+        (gx, gy),
+        dem_z,
+        (out or cfg.output_dir) / "qc" / "sites_map.png",
+        cfg.qc.dpi,
+    )
+    dropped = []
+    if result.n_no_data:
+        dropped.append(f"{result.n_no_data} without DEM data")
+    if result.n_low:
+        dropped.append(f"{result.n_low} below min_elevation_m")
+    typer.echo(
+        f"wrote {result.n_written} of {result.n_grid} grid site(s) to {result.path}"
+        + (f" (dropped {', '.join(dropped)})" if dropped else "")
+    )
+    typer.echo(f"DEM: {result.dem.path}; map: {fig}")
+
+
+@app.command()
+def export(config: ConfigArg, out: OutOpt = None) -> None:
+    """Shapefiles of the candidates (input and design outcome), target boxes, final network
+    and every network size; writes <output_dir>/gis."""
+    try:
+        cfg = load_config(config)
+        paths = run_export(cfg, out)
+    except NetDesignError as exc:
+        raise _fail(exc) from exc
+    for p in paths:
+        typer.echo(f"wrote {p}")
+
+
 # ---------------------------------------------------------------- stage summaries
 
 
@@ -133,11 +197,18 @@ def _echo_validation(cfg: Config, out: Path | None, result: ValidationResult) ->
 def _echo_design(cfg: Config, out: Path | None, result: DesignResult) -> None:
     data = json.loads(((out or cfg.output_dir) / "design" / "design.json").read_text())
     names = data["recommended_stations"]
-    typer.echo(f"{'n':>3}  {cfg.design.criterion} ({cfg.design.measure}, m)  stations")
+    locating = data.get("min_located_fraction") is not None
+    head = f"{'n':>3}  {cfg.design.criterion} ({cfg.design.measure}, m)"
+    typer.echo(head + ("  located" if locating else "") + "  stations")
     for net in data["networks"]:
         mark = "*" if net["n"] == result.recommended_n else " "
-        typer.echo(f"{net['n']:>3}{mark} {net['criterion_m']:10.1f}  {' '.join(net['stations'])}")
+        loc = f"  {100 * net['located_fraction']:6.0f}%" if locating else ""
+        typer.echo(
+            f"{net['n']:>3}{mark} {net['criterion_m']:10.1f}{loc}  {' '.join(net['stations'])}"
+        )
     typer.echo(f"recommended: {result.recommended_n} stations: {' '.join(names)}")
+    for warning in data.get("warnings", []):
+        typer.secho(f"WARNING: {warning}", fg=typer.colors.YELLOW, err=True)
     typer.echo(f"details in {(out or cfg.output_dir) / 'design'}; report in qc/report.html")
 
 

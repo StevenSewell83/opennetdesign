@@ -67,7 +67,7 @@ def test_target_and_origin_in_projected_coordinates() -> None:
     a, b = sample_sources(geo, frame), sample_sources(proj, frame, NZTM)
     assert abs(len(a) - len(b)) <= 0.1 * len(a)
     with pytest.raises(ConfigError, match="easting/northing"):
-        geo.box(NZTM)
+        geo.check_crs(NZTM)
     origin = Origin(easting=e0, northing=n0)
     lat, lon = origin.to_wgs84(NZTM)
     assert (lon, lat) == pytest.approx((176.11, -38.62), abs=1e-8)
@@ -78,7 +78,7 @@ def test_target_and_origin_in_projected_coordinates() -> None:
 def test_target_needs_exactly_one_kind() -> None:
     with pytest.raises(ConfigError, match="either long and lat"):
         TargetSpec(long=(1, 2), lat=(1, 2), easting=(1, 2), northing=(1, 2), depth_km=(0, 1))
-    with pytest.raises(ConfigError, match="either long and lat"):
+    with pytest.raises(ConfigError, match="either one box"):
         TargetSpec(depth_km=(0, 1))
 
 
@@ -99,6 +99,7 @@ def test_projected_run_matches_geographic(tmp_path: Path, nll_bin: Path) -> None
     path = write_example(tmp_path / "proj", nll_bin, **common)
     raw = yaml.safe_load(path.read_text())
     raw["crs"] = {"epsg": 2193}
+    raw.pop("sites")  # its centre is long/lat; not used by the run
     raw["stations"]["candidates"] = str(nztm_candidates(tmp_path / "proj" / "c.csv"))
     t = raw.pop("target")
     (e0, e1), (n0, n1) = zip(

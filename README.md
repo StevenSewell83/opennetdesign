@@ -55,6 +55,7 @@ netdesign sensitivity config.yaml   # ensemble, grids, travel times, sensitiviti
 netdesign validate    config.yaml   # NonLinLoc check of the predictions (validation.enabled)
 netdesign design      config.yaml   # optimal networks and recommended size
 netdesign report      config.yaml   # rebuild <output_dir>/qc/report.html
+netdesign export      config.yaml   # shapefiles in <output_dir>/gis (candidates, targets, networks)
 ```
 
 Intermediate commands `ensemble`, `grids` and `traveltimes` build and keep those stages only.
@@ -64,12 +65,19 @@ Intermediate commands `ensemble`, `grids` and `traveltimes` build and keep those
 - **Candidate sites**: CSV `station,long,lat,z` (geographic CRS) or
   `station,easting,northing,z` (projected CRS); `z` is elevation in metres above mean sea
   level (e.g. from a DEM). The CRS of all coordinate inputs is set by EPSG code (`crs.epsg`).
+  Or generate them: `netdesign sites config.yaml` lays out a grid (`sites`: centre, spacing,
+  extent, rectangle/ellipse, rotation) and takes `z` from a DEM, either Copernicus GLO-30/90
+  (downloaded for the area only and cached) or a local GeoTIFF. It writes
+  `stations.candidates` (`--force` to overwrite) and a map in `qc/sites_map.png`. Sites with
+  no DEM data (sea) or below `min_elevation_m` are dropped.
 - **Velocity model**: NonLinLoc `LAYER` lines or CSV (layered), or a CSV of 3D nodes.
 - **Target volume**: a box and depth range where events are expected.
 
 ### Outputs (`<output_dir>/`)
 
 - `design/` — best network per size, recommended network.
+- `gis/` (`netdesign export`) — shapefiles in the input CRS: input candidates, target boxes,
+  candidates with their design outcome, the final network (by rank), every network size.
 - `qc/report.html` — all checks and figures; `qc/candidates_outcome.csv`/`.geojson` —
   every candidate with its status, rank and contribution.
 - `sensitivity/`, `validation/`, `models/` — intermediate results.
