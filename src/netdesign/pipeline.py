@@ -13,6 +13,7 @@ import json
 import shutil
 import time
 import warnings
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -448,7 +449,17 @@ def run_validate(cfg: Config, out: Path | None = None) -> ValidationResult:
     return result
 
 
-def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
+def _prefixed(progress: Callable[[str], None] | None, prefix: str) -> Callable[[str], None] | None:
+    """``progress`` with every message prefixed."""
+    if progress is None:
+        return None
+    report = progress
+    return lambda message: report(prefix + message)
+
+
+def run_design(
+    cfg: Config, out: Path | None = None, progress: Callable[[str], None] | None = None
+) -> DesignResult:
     """Choose the network: best station subset per size and a recommended size.
 
     Uses ``out/sensitivity/sensitivity.npz`` (run ``sensitivity`` first); writes
@@ -475,7 +486,7 @@ def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
     ev = Evaluator(sens, cfg.picks, cfg.design, det)
     sta_xyz = _station_xyz(out, sens)
     result = optimise(
-        ev, sens.stations, cfg.design, np.random.default_rng(cfg.design.seed), sta_xyz
+        ev, sens.stations, cfg.design, np.random.default_rng(cfg.design.seed), sta_xyz, progress
     )
     if cfg.detection.enabled:
         # How much does the "how small an event" knob (margin or magnitude) change the answer?
@@ -494,6 +505,7 @@ def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
                     quick,
                     np.random.default_rng(cfg.design.seed),
                     sta_xyz,
+                    _prefixed(progress, f"[{key} {value:g}] "),
                 )
             rec_m = res.networks[res.recommended_n]
             margin_rows.append(
@@ -527,6 +539,8 @@ def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
                     names[k]: v for k, v in r.loss_one_station_m.items()
                 },
                 "located_fraction": r.located_fraction,
+                "horizontal_m": r.horizontal_m,
+                "depth_m": r.depth_m,
                 "meets_located_fraction": r.meets_located,
                 "located_fraction_if_station_lost": {
                     names[k]: v for k, v in r.loss_located_fraction.items()
@@ -567,8 +581,9 @@ def run_design(cfg: Config, out: Path | None = None) -> DesignResult:
             indent=2,
         )
     )
-    lines = ["n,criterion_m,located_fraction,stations"] + [
-        f"{x['n']},{x['criterion_m']:.2f},{x['located_fraction']:.3f},{' '.join(x['stations'])}"
+    lines = ["n,criterion_m,horizontal_m,depth_m,located_fraction,stations"] + [
+        f"{x['n']},{x['criterion_m']:.2f},{x['horizontal_m']:.2f},{x['depth_m']:.2f},"
+        f"{x['located_fraction']:.3f},{' '.join(x['stations'])}"
         for x in nets
     ]
     (ddir / "networks.csv").write_text("\n".join(lines) + "\n")

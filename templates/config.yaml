@@ -115,6 +115,8 @@ design:
   vertical_weight: 1.0             # >1 to favour depth accuracy
   target_m: null                   # EDIT (optional): accuracy goal in m; recommends the smallest
                                    # network meeting it (else the 5 % improvement knee)
+  target_horizontal_m: null        # EDIT (optional): horizontal / depth RMS goals in m; then set
+  target_depth_m: null             # vertical_weight = (horizontal / depth goal)^2, e.g. 0.09
 
 # ---------------------------------------------------------------- validation
 validation:

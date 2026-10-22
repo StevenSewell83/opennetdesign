@@ -24,7 +24,7 @@ from scipy.special import gamma, kv
 
 import netdesign
 from netdesign.crs import InputCRS
-from netdesign.design import DesignResult, Evaluator
+from netdesign.design import DesignResult, DesignSpec, Evaluator, meets_targets
 from netdesign.frame import GridGeometry, LocalFrame
 from netdesign.information import PickSpec, achievable_stats, station_stats
 from netdesign.qc import figures
@@ -153,6 +153,19 @@ def dir_size_mb(*dirs: Path) -> float:
 
 
 # ---------------------------------------------------------------- helpers
+
+
+def _goal_text(d: DesignSpec) -> str:
+    goals = [
+        f"{name} {t:g} m"
+        for name, t in (
+            ("target", d.target_m),
+            ("horizontal", d.target_horizontal_m),
+            ("depth", d.target_depth_m),
+        )
+        if t is not None
+    ]
+    return "goals: " + ", ".join(goals) if goals else f"knee: gain < {d.min_gain_pct}%"
 
 
 def _target_polygon(
@@ -910,7 +923,7 @@ def qc_design(
             "recommended network size",
             "info",
             result.recommended_n,
-            f"target {d.target_m} m" if d.target_m else f"knee: gain < {d.min_gain_pct}%",
+            _goal_text(d),
         ),
         Check(
             "design",
@@ -921,8 +934,8 @@ def qc_design(
             f"all candidates: {result.all_candidates_m:.1f} m",
         ),
     ]
-    if d.target_m is not None:
-        ok = rec.criterion_m <= d.target_m
+    if any(t is not None for t in (d.target_m, d.target_horizontal_m, d.target_depth_m)):
+        ok = meets_targets(rec, d)
         checks.append(
             Check(
                 "design",

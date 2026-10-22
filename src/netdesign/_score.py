@@ -94,14 +94,11 @@ def _add_pick(dist: FloatArray, p: float, kk: int) -> None:
 def _located(
     pick_p: FloatArray,
     is_p: npt.NDArray[np.bool_],
-    base_idx: IntArray,
+    start: FloatArray,
     add: IntArray,
-    sub: IntArray,
     row: int,
     j: int,
-    n_base: int,
     n_add: int,
-    n_sub: int,
     n_ph: int,
     kk: int,
     min_p_picks: int,
@@ -109,25 +106,16 @@ def _located(
     dist_s: FloatArray,
 ) -> float:
     """Probability that an event at point ``j`` gets >= ``kk`` picks including >=
-    ``min_p_picks`` P picks on this row's network (independent picks)."""
+    ``min_p_picks`` P picks: the precomputed P / S pick-count distributions of the row's
+    base network (``start``, (2, J, kk + 1)) plus this row's added stations (independent
+    picks)."""
     for c in range(kk + 1):
-        dist_p[c] = 0.0
-        dist_s[c] = 0.0
-    dist_p[0] = 1.0
-    dist_s[0] = 1.0
-    for t in range(n_base + n_add):
-        if t < n_base:
-            s = base_idx[t]
-            removed = False
-            for u in range(n_sub):
-                if sub[row, u] == s:
-                    removed = True
-            if removed:
-                continue
-        else:
-            s = add[row, t - n_base]
-            if s < 0:
-                continue
+        dist_p[c] = start[0, j, c]
+        dist_s[c] = start[1, j, c]
+    for t in range(n_add):
+        s = add[row, t]
+        if s < 0:
+            continue
         for ph in range(n_ph):
             if is_p[ph]:
                 _add_pick(dist_p, pick_p[s, j, ph], kk)
@@ -161,7 +149,8 @@ def _kernel(
     out_e: FloatArray,  # (N, J) per-point error variance (percentile)
     pick_p: FloatArray,  # (S, J, P) pick probabilities, or (0, 0, 0): every event located
     is_p: npt.NDArray[np.bool_],  # (P,) phase is a P phase
-    base_idx: IntArray,  # (nb,) stations of the base network
+    variants: FloatArray,  # (V, 2, J, K+1) P / S pick-count distributions of base variants
+    row_variant: IntArray,  # (N,) which variant each row starts from (base minus its sub)
     min_picks: int,
     min_p_picks: int,
     out_frac: FloatArray,  # (N,) located fraction sum_j w_j L_j
@@ -170,7 +159,7 @@ def _kernel(
     n_rows, n_j = add.shape[0], base_a.shape[0]
     n_add, n_sub = add.shape[1], sub.shape[1]
     has_loc = pick_p.shape[0] > 0
-    n_base, n_ph, kk = base_idx.shape[0], pick_p.shape[2], max(min_picks, 1)
+    n_ph, kk = pick_p.shape[2], max(min_picks, 1)
     has_b = base_b.shape[0] > 0
     has_x = base_x.shape[0] > 0
     k = base_b.shape[2]
@@ -192,7 +181,7 @@ def _kernel(
             located = 1.0
             if has_loc:
                 located = _located(
-                    pick_p, is_p, base_idx, add, sub, row, j, n_base, n_add, n_sub, n_ph, kk,
+                    pick_p, is_p, variants[row_variant[row]], add, row, j, n_add, n_ph, kk,
                     min_p_picks, dist_p, dist_s,
                 )  # fmt: skip
             # summed statistics of this network at point j
@@ -306,16 +295,16 @@ def point_scores(
     vertical_weight: float,
     gls: bool,
     criterion: str,
-    locate: tuple[FloatArray, npt.NDArray[np.bool_], IntArray, int, int] | None = None,
+    locate: tuple[FloatArray, npt.NDArray[np.bool_], FloatArray, IntArray, int, int] | None = None,
 ) -> tuple[FloatArray, FloatArray, FloatArray | None]:
     """Per network: the located-weighted sum ``sum_j w_j L_j e_j`` (rms) or ``sum_j w_j L_j
     log det C_xyz,j`` (logdet), and the located fraction ``sum_j w_j L_j``; for percentile the
     per-point error variances ``e`` (N, J) instead of the sum, and ``L`` (N, J).
 
     ``base``/``stations`` hold the ``A``, ``B`` and ``C`` (achievable) or ``M`` (gls) arrays,
-    ``None`` when absent. ``locate`` = (pick probabilities (S, J, P), P-phase flags, base
-    station indices, min picks, min P picks); without it every event counts as located
-    (``L = 1``)."""
+    ``None`` when absent. ``locate`` = (pick probabilities (S, J, P), P-phase flags, pick-count
+    distributions of the base-network variants (V, 2, J, K+1), the variant of each row,
+    min picks, min P picks); without it every event counts as located (``L = 1``)."""
     (base_a, base_b, base_x), (sta_a, sta_b, sta_x) = base, stations
     n, n_j = add.shape[0], base_a.shape[0]
     code = CRITERIA[criterion]
@@ -324,9 +313,9 @@ def point_scores(
     out_e = np.empty((n, n_j)) if code == 1 else _empty(2)
     if locate is None:
         pick_p, is_p = _empty(3), np.zeros(0, dtype=np.bool_)
-        base_idx, min_picks, min_p = np.zeros(0, dtype=np.intp), 1, 0
+        variants, row_variant, min_picks, min_p = _empty(4), np.zeros(n, np.intp), 1, 0
     else:
-        pick_p, is_p, base_idx, min_picks, min_p = locate
+        pick_p, is_p, variants, row_variant, min_picks, min_p = locate
     out_l = np.ones((n, n_j)) if code == 1 else _empty(2)
     _kernel(
         np.ascontiguousarray(base_a, dtype=np.float64),
@@ -346,7 +335,8 @@ def point_scores(
         out_e,
         pick_p,
         is_p,
-        np.ascontiguousarray(base_idx, dtype=np.intp),
+        np.ascontiguousarray(variants, dtype=np.float64),
+        np.ascontiguousarray(row_variant, dtype=np.intp),
         int(min_picks),
         int(min_p),
         out_frac,

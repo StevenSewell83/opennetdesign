@@ -141,7 +141,8 @@ def _networks(
     """``network_final`` fields: STATION, RANK (1 = most important, from the design QC;
     blank without it), ELEV_M, N.
     ``networks_all`` fields: N (network size), STATION, CRIT_M (criterion, m), LOC_FRAC
-    (located fraction), RECOMMEND (1 for the recommended size)."""
+    (located fraction), HORIZ_M, DEPTH_M (RMS errors, m), RECOMMEND (1 for the recommended
+    size)."""
     index = {n: i for i, n in enumerate(cand.names)}
     a, b = _xy(cand.crs, cand.long, cand.lat)
     rec_n = design["recommended_n"]
@@ -159,6 +160,8 @@ def _networks(
         w.field("STATION", "C", 32)
         w.field("CRIT_M", "N", 14, 2)
         w.field("LOC_FRAC", "N", 8, 4)
+        w.field("HORIZ_M", "N", 14, 2)
+        w.field("DEPTH_M", "N", 14, 2)
         w.field("RECOMMEND", "N", 1, 0)
         for net in design["networks"]:
             for name in net["stations"]:
@@ -169,6 +172,8 @@ def _networks(
                     name,
                     net["criterion_m"],
                     net.get("located_fraction", 1.0),
+                    net.get("horizontal_m"),
+                    net.get("depth_m"),
                     int(net["n"] == rec_n),
                 )
     for p in (final, everything):

@@ -237,3 +237,23 @@ def test_min_separation_limits_sizes_and_fixed_exempt() -> None:
         )
     with pytest.raises(ConfigError, match="station coordinates"):
         optimise(Evaluator(sens, PICKS, spec), sens.stations, spec, np.random.default_rng(0))
+
+
+def test_axis_errors_split_the_rms() -> None:
+    sens = straight_ray(ring_with_decoys(), target_points())
+    ev = Evaluator(sens, PICKS, DesignSpec())
+    h, z = ev.axis_errors([0, 2, 4, 6, 9])
+    assert np.hypot(h, z) == pytest.approx(ev.score([0, 2, 4, 6, 9]), rel=1e-9)
+    weighted = Evaluator(sens, PICKS, DesignSpec(vertical_weight=0.09))
+    assert np.sqrt(h**2 + 0.09 * z**2) == pytest.approx(weighted.score([0, 2, 4, 6, 9]), rel=1e-9)
+
+
+def test_recommend_per_axis_goals() -> None:
+    def net(n: int, h: float, z: float) -> NetworkResult:
+        return NetworkResult(n, tuple(range(n)), h, h, 1, None, None, {}, horizontal_m=h, depth_m=z)
+
+    nets = {3: net(3, 300, 400), 4: net(4, 160, 300), 5: net(5, 140, 600), 6: net(6, 140, 450)}
+    assert _recommend(nets, DesignSpec(target_horizontal_m=150, target_depth_m=500), 100) == 6
+    assert _recommend(nets, DesignSpec(target_horizontal_m=150), 100) == 5
+    assert _recommend(nets, DesignSpec(target_depth_m=350), 100) == 4
+    assert _recommend(nets, DesignSpec(target_horizontal_m=50), 100) == 6  # unreachable

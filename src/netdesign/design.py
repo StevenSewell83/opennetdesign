@@ -51,7 +51,8 @@ starts and random baselines all respect it, and sizes no feasible network reache
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Self
 
@@ -70,6 +71,7 @@ __all__ = [
     "DesignSpec",
     "Evaluator",
     "NetworkResult",
+    "meets_targets",
     "optimise",
     "separation_conflicts",
 ]
@@ -101,6 +103,10 @@ class DesignSpec(BaseModel):
     n_random: int = Field(200, ge=0)
     seed: int = 0
     target_m: float | None = Field(None, gt=0, description="recommend smallest n meeting it")
+    target_horizontal_m: float | None = Field(
+        None, gt=0, description="horizontal RMS goal (located events); with target_depth_m"
+    )
+    target_depth_m: float | None = Field(None, gt=0, description="depth RMS goal")
     min_gain_pct: float = Field(5.0, ge=0, description="knee: stop when a station adds less")
     min_separation_km: float = Field(
         0.0, ge=0, description="chosen stations must be farther apart than this (horizontal)"
@@ -164,28 +170,94 @@ class Evaluator:
             mean = np.asarray(detection, dtype=np.float64).mean(axis=0)  # (S, P, J)
             self.pick_p = np.ascontiguousarray(mean.transpose(0, 2, 1))
 
+    def _empty_counts(self) -> FloatArray:
+        """P / S pick-count distributions (2, J, K+1) of an empty network."""
+        d = np.zeros((2, len(self.weights), self.spec.locate_min_picks + 1))
+        d[:, :, 0] = 1.0
+        return d
+
+    def _fold(self, dist: FloatArray, s: int) -> FloatArray:
+        """``dist`` with station ``s``'s picks added (counts capped at K = "K or more")."""
+        assert self.pick_p is not None
+        k = self.spec.locate_min_picks
+        out = dist.copy()
+        for ph, is_p in enumerate(self.is_p):
+            i = 0 if is_p else 1
+            d, p = out[i], self.pick_p[s, :, ph][:, None]
+            new = d * (1 - p)
+            new[:, 1:] += d[:, :-1] * p
+            new[:, k] += d[:, k] * p[:, 0]
+            out[i] = new
+        return out
+
+    def _counts(self, stations: Sequence[int]) -> FloatArray:
+        dist = self._empty_counts()
+        for s in stations:
+            dist = self._fold(dist, s)
+        return dist
+
+    @staticmethod
+    def _combine(a: FloatArray, b: FloatArray) -> FloatArray:
+        """Pick-count distributions of two disjoint station sets together (capped)."""
+        k = a.shape[-1] - 1
+        out = np.zeros_like(a)
+        for i in range(k + 1):
+            for j in range(k + 1 - i):
+                out[..., i + j] += a[..., i] * b[..., j]
+        out[..., k] = 1.0 - out[..., :k].sum(axis=-1)  # the rest is "K or more"
+        return out
+
+    def _located_from(self, dist: FloatArray) -> FloatArray:
+        k, a = self.spec.locate_min_picks, self.spec.locate_min_p_picks
+        tail_s = np.cumsum(dist[1][:, ::-1], axis=1)[:, ::-1]  # P(S picks >= m)
+        return np.sum(
+            [dist[0][:, i] * (tail_s[:, k - i] if i < k else 1.0) for i in range(a, k + 1)],
+            axis=0,
+        )
+
     def located_probability(self, stations: Sequence[int]) -> FloatArray:
         """``L_j`` (J,): probability that an event at each point is located by the network
         (numpy reference for the compiled kernel); ones without locatability."""
-        n_j = len(self.weights)
         if self.pick_p is None:
-            return np.ones(n_j)
-        k, a = self.spec.locate_min_picks, self.spec.locate_min_p_picks
-        dist = {True: np.zeros((n_j, k + 1)), False: np.zeros((n_j, k + 1))}
-        for d in dist.values():
-            d[:, 0] = 1.0
-        for s in stations:
-            for ph, is_p in enumerate(self.is_p):
-                d, p = dist[bool(is_p)], self.pick_p[s, :, ph]
-                new = d * (1 - p)[:, None]
-                new[:, 1:] += d[:, :-1] * p[:, None]
-                new[:, k] += d[:, k] * p  # "k or more" stays there
-                dist[bool(is_p)] = new
-        tail_s = np.cumsum(dist[False][:, ::-1], axis=1)[:, ::-1]  # P(S picks >= m)
-        return np.sum(
-            [dist[True][:, i] * (tail_s[:, k - i] if i < k else 1.0) for i in range(a, k + 1)],
-            axis=0,
-        )
+            return np.ones(len(self.weights))
+        return self._located_from(self._counts(stations))
+
+    def _variants(self, base: Sequence[int], sub: IntArray) -> tuple[FloatArray, IntArray]:
+        """Pick-count distributions of the base network minus each row's ``sub`` stations
+        (V, 2, J, K+1), and each row's variant. Leave-one-out variants come from prefix and
+        suffix products (O(n) for all of them); other removals are counted directly."""
+        base = list(base)
+        if sub.shape[1] <= 1:  # the search's case: at most one removal per row (vectorised)
+            col = sub[:, 0] if sub.shape[1] else np.full(len(sub), -1, np.intp)
+            col = np.where(col >= 0, col, -1)
+            values, inverse = np.unique(col, return_inverse=True)
+            unique: list[tuple[int, ...]] = [() if v < 0 else (int(v),) for v in values]
+            row_variant = inverse.astype(np.intp)
+        else:
+            keys = [tuple(sorted(int(x) for x in row if x >= 0)) for row in sub]
+            unique = sorted(set(keys))
+            where = {key: i for i, key in enumerate(unique)}
+            row_variant = np.array([where[key] for key in keys], dtype=np.intp)
+        singles = {key[0] for key in unique if len(key) == 1 and key[0] in base}
+        loo: dict[int, FloatArray] = {}
+        if singles:
+            prefix = [self._empty_counts()]
+            for s in base:
+                prefix.append(self._fold(prefix[-1], s))
+            suffix = [self._empty_counts()]
+            for s in reversed(base):
+                suffix.append(self._fold(suffix[-1], s))
+            suffix.reverse()  # suffix[i] = stations base[i:]
+            for i, s in enumerate(base):
+                if s in singles:
+                    loo[s] = self._combine(prefix[i], suffix[i + 1])
+        out = np.empty((len(unique), 2, len(self.weights), self.spec.locate_min_picks + 1))
+        for i, key in enumerate(unique):
+            if len(key) == 1 and key[0] in loo:
+                out[i] = loo[key[0]]
+            else:
+                out[i] = self._counts([s for s in base if s not in key])
+        return out, row_variant
 
     def penalised(self, metric: FloatArray, located: FloatArray) -> FloatArray:
         """Search score: ``metric`` where the located fraction reaches
@@ -222,10 +294,12 @@ class Evaluator:
         spec = self.spec
         locate = None
         if self.pick_p is not None:
+            variants, row_variant = self._variants(base, sub_a)
             locate = (
                 self.pick_p,
                 self.is_p,
-                np.asarray(list(base), dtype=np.intp),
+                variants,
+                row_variant,
                 spec.locate_min_picks,
                 spec.locate_min_p_picks,
             )
@@ -337,6 +411,18 @@ class Evaluator:
             return self.criterion_from_cov(cov), 1.0
         return self.criterion_from_cov(cov, located), float(np.sum(self.weights * located))
 
+    def axis_errors(self, stations: Sequence[int]) -> tuple[float, float]:
+        """Horizontal (``sqrt(s_x^2 + s_y^2)``) and depth RMS errors (m) over located
+        events, whatever the criterion."""
+        located = self.located_probability(stations)
+        w = self.weights * located
+        if not np.sum(w) > 0:
+            return float("inf"), float("inf")
+        var = np.diagonal(self.covariance(self.sums(stations)), axis1=-2, axis2=-1)
+        h = np.sum(w * (var[:, 0] + var[:, 1])) / np.sum(w)
+        z = np.sum(w * var[:, 2]) / np.sum(w)
+        return float(np.sqrt(h) * 1000), float(np.sqrt(z) * 1000)
+
     def score(self, stations: Sequence[int]) -> float:
         """Search score of a network given by station indices (numpy reference)."""
         metric, frac = self.evaluate(stations)
@@ -366,6 +452,8 @@ class NetworkResult:
     located_fraction: float = 1.0  # share of design events located (1 without detection)
     meets_located: bool = True  # located_fraction >= min_located_fraction
     loss_located_fraction: dict[int, float] = field(default_factory=dict)
+    horizontal_m: float | None = None  # RMS horizontal error over located events
+    depth_m: float | None = None  # RMS depth error over located events
 
 
 @dataclass
@@ -464,9 +552,11 @@ def optimise(
     spec: DesignSpec,
     rng: np.random.Generator,
     xy: npt.ArrayLike | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> DesignResult:
     """Run the search described in the module docstring. ``xy`` (S, 2+) are the stations'
-    local coordinates in km, needed for ``min_separation_km``.
+    local coordinates in km, needed for ``min_separation_km``. ``progress`` receives a line
+    per finished network size (with a rough time remaining).
 
     Raises
     ------
@@ -518,7 +608,12 @@ def optimise(
     networks: dict[int, NetworkResult] = {}
     fixed_set = set(fixed)
     free = [s for s in usable if s not in fixed_set]
-    for n in range(n_min, len(order) + 1):
+    start_time = time.perf_counter()
+    sizes = list(range(n_min, len(order) + 1))
+    # rough relative cost of a size: exchange passes x swaps per pass ~ (n (S - n))^2
+    work = {k: float(k * max(len(usable) - k, 1)) ** 2 for k in sizes}
+    total_work, done_work = sum(work.values()), 0.0
+    for n in sizes:
         start = order[:n]
         best = _exchange(ev, start, usable, fixed_set, conflict) if spec.exchange else list(start)
         candidates = [best]
@@ -570,7 +665,19 @@ def optimise(
             float(located),
             bool(best_score < PENALTY_M),
             loss_frac,
+            *ev.axis_errors(best),
         )
+
+        if progress is not None:
+            done_work += work[n]
+            elapsed = time.perf_counter() - start_time
+            left = elapsed * (total_work - done_work) / max(done_work, 1e-9)
+            net = networks[n]
+            progress(
+                f"n={n} of {sizes[0]}-{sizes[-1]}: {net.criterion_m:.0f} m, "
+                f"located {100 * net.located_fraction:.0f}%  "
+                f"[{elapsed / 60:.1f} min, ~{left / 60:.0f} min left]"
+            )
 
     all_score = float(ev.evaluate_batch([], [usable])[0][0])
     recommended = _recommend(networks, spec, all_score)
@@ -585,14 +692,25 @@ def optimise(
     return DesignResult(order, networks, recommended, usable, fixed, all_score, notes)
 
 
+def meets_targets(net: NetworkResult, spec: DesignSpec) -> bool:
+    """Whether a network meets every accuracy goal that is set."""
+    goals = [
+        (net.criterion_m, spec.target_m),
+        (net.horizontal_m, spec.target_horizontal_m),
+        (net.depth_m, spec.target_depth_m),
+    ]
+    return all(v is not None and v <= t for v, t in goals if t is not None)
+
+
 def _recommend(networks: dict[int, NetworkResult], spec: DesignSpec, all_m: float) -> int:
-    """Smallest size meeting ``target_m``, else the knee; only sizes that locate enough
-    design events count (the largest size if none does)."""
+    """Smallest size meeting the accuracy goals (``target_m``, ``target_horizontal_m``,
+    ``target_depth_m``), else the knee; only sizes that locate enough design events count
+    (the largest size if none does, or if no size meets the goals)."""
     ns = [n for n in sorted(networks) if networks[n].meets_located]
     if not ns:
         return max(networks)
-    if spec.target_m is not None:
-        meeting = [n for n in ns if networks[n].criterion_m <= spec.target_m]
+    if any(t is not None for t in (spec.target_m, spec.target_horizontal_m, spec.target_depth_m)):
+        meeting = [n for n in ns if meets_targets(networks[n], spec)]
         return meeting[0] if meeting else ns[-1]
     for n in ns[:-1]:
         nxt = networks[n + 1].criterion_m if n + 1 in ns else all_m

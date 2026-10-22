@@ -100,6 +100,8 @@ design:                        # `netdesign design` (after `sensitivity`)
   n_random: 200                # random networks per size (baseline)
   seed: 0
   target_m: null               # recommend the smallest network meeting this criterion (m)
+  target_horizontal_m: null    # ... or meeting these RMS goals (m, over located events);
+  target_depth_m: null         # set vertical_weight = (horizontal / depth goal)^2 to match
   min_gain_pct: 5.0            # otherwise the knee: stop when one more station adds < 5%
   locatability: true           # with detection: an event counts only if it gets enough picks;
                                # the criterion is over located events (false: averaged picks)

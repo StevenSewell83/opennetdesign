@@ -38,6 +38,10 @@ OutOpt = Annotated[
 ]
 
 
+def _progress(message: str) -> None:
+    typer.echo(f"  {message}", err=True)
+
+
 def _fail(exc: NetDesignError) -> typer.Exit:
     typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
     return typer.Exit(1)
@@ -198,13 +202,14 @@ def _echo_design(cfg: Config, out: Path | None, result: DesignResult) -> None:
     data = json.loads(((out or cfg.output_dir) / "design" / "design.json").read_text())
     names = data["recommended_stations"]
     locating = data.get("min_located_fraction") is not None
-    head = f"{'n':>3}  {cfg.design.criterion} ({cfg.design.measure}, m)"
+    head = f"{'n':>3}  {cfg.design.criterion} ({cfg.design.measure}, m)  horiz  depth"
     typer.echo(head + ("  located" if locating else "") + "  stations")
     for net in data["networks"]:
         mark = "*" if net["n"] == result.recommended_n else " "
         loc = f"  {100 * net['located_fraction']:6.0f}%" if locating else ""
         typer.echo(
-            f"{net['n']:>3}{mark} {net['criterion_m']:10.1f}{loc}  {' '.join(net['stations'])}"
+            f"{net['n']:>3}{mark} {net['criterion_m']:10.1f}  {net['horizontal_m']:5.0f}  "
+            f"{net['depth_m']:5.0f}{loc}  {' '.join(net['stations'])}"
         )
     typer.echo(f"recommended: {result.recommended_n} stations: {' '.join(names)}")
     for warning in data.get("warnings", []):
@@ -245,7 +250,7 @@ def design(config: ConfigArg, out: OutOpt = None) -> None:
     """Choose the network (run `sensitivity` first); writes <output_dir>/design."""
     try:
         cfg = load_config(config)
-        result = run_design(cfg, out)
+        result = run_design(cfg, out, _progress)
     except NetDesignError as exc:
         raise _fail(exc) from exc
     _echo_design(cfg, out, result)
@@ -269,7 +274,7 @@ def run(config: ConfigArg, out: OutOpt = None) -> None:
         else:
             typer.echo("(validation skipped: validation.enabled is false)")
         typer.secho("== design", bold=True)
-        _echo_design(cfg, out, run_design(cfg, out))
+        _echo_design(cfg, out, run_design(cfg, out, _progress))
     except NetDesignError as exc:
         raise _fail(exc) from exc
     typer.echo(
