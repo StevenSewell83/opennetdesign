@@ -522,6 +522,13 @@ def run_design(
     sens_path = out / "sensitivity" / "sensitivity.npz"
     if not sens_path.is_file():
         raise ConfigError(f"{sens_path} not found; run `netdesign sensitivity` first")
+    # The design QC reads it only after the (possibly hours-long) search, so check now.
+    sens_qc = out / "qc" / "sensitivity.json"
+    if cfg.qc.enabled and not sens_qc.is_file():
+        raise ConfigError(
+            f"{sens_qc} not found (the `sensitivity` run's QC did not finish); rerun "
+            "`netdesign sensitivity`, or set qc.enabled: false"
+        )
     if cfg.stations is None:
         raise ConfigError("design needs the 'stations' config section")
     start = time.perf_counter()

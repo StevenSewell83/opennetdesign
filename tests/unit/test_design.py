@@ -187,6 +187,11 @@ def test_design_end_to_end(tmp_path: Path, nll_bin: Path) -> None:
     assert statuses.count("selected") == result.recommended_n
     assert "<h2>Network design</h2>" in (q / "report.html").read_text()
 
+    # Without the sensitivity QC the design stops before searching, not after.
+    (q / "sensitivity.json").unlink()
+    with pytest.raises(ConfigError, match=r"sensitivity\.json"):
+        run_design(cfg)
+
 
 def _dense_grid() -> np.ndarray:
     g = np.arange(-4.0, 4.01, 1.0)
