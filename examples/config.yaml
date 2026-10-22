@@ -41,6 +41,8 @@ nll:
   plfd_eps: 1.0e-2             # Grid2Time GT_PLFD homogeneous-source tolerance (see grid2time.py)
   angles: false                # Grid2Time takeoff-angle grids
   keep_grids: base             # after `sensitivity`: none | base (model_000, for validation) | all
+  max_disk_gb: null            # travel-time grids on disk at once (grids not kept are made and
+                               # deleted in station batches that fit); default half the free space
 
 target:                        # where events are expected
   long: [176.11, 176.15]       # or easting: [..] / northing: [..] for a projected crs

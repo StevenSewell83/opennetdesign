@@ -89,3 +89,26 @@ def test_cli_on_example(tmp_path: Path, nll_bin: Path) -> None:
     # keep_grids: base -> only the base model's grids remain.
     assert sorted(d.name for d in (out / "grids").glob("model_*")) == ["model_000"]
     assert sorted(d.name for d in (out / "traveltimes").glob("model_*")) == ["model_000"]
+
+
+def test_station_batches_match_one_pass(tmp_path: Path, nll_bin: Path) -> None:
+    """Travel-time grids processed in one-station batches give the same sensitivities."""
+    one = load_config(write_example(tmp_path / "one", nll_bin, nll={"keep_grids": "none"}))
+    batched = load_config(
+        write_example(tmp_path / "b", nll_bin, nll={"keep_grids": "none", "max_disk_gb": 1e-9})
+    )
+    a, b = run_sensitivity(one), run_sensitivity(batched)
+    np.testing.assert_array_equal(a.T, b.T)
+    np.testing.assert_array_equal(a.G, b.G)
+    assert not any((batched.output_dir / "traveltimes").rglob("*.buf"))
+
+
+def test_kept_grids_must_fit_on_disk(tmp_path: Path, nll_bin: Path, monkeypatch) -> None:
+    import shutil
+    from collections import namedtuple
+
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda _p: usage(10**12, 10**12, 10**3))
+    cfg = load_config(write_example(tmp_path, nll_bin, nll={"keep_grids": "base"}))
+    with pytest.raises(ConfigError, match="keep_grids"):
+        run_sensitivity(cfg)

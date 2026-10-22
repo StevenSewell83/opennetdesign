@@ -45,6 +45,9 @@ class NLLSpec(BaseModel):
     keep_grids: Literal["none", "base", "all"] = Field(
         "base", description="grids kept after the sensitivity step"
     )
+    max_disk_gb: float | None = Field(
+        None, gt=0, description="travel-time grids on disk at once; default half the free space"
+    )
 
 
 @dataclass(frozen=True)

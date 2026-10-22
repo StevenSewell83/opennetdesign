@@ -299,6 +299,31 @@ def _qc_sensitivity(cfg: Config, ctx: _Context, sens: Sensitivity, out: Path) ->
     )
 
 
+def _station_batch(cfg: Config, ctx: _Context, tdir: Path) -> int:
+    """Stations per Grid2Time batch so that one batch's travel-time grids fit in
+    ``nll.max_disk_gb`` (default half the free disk space).
+
+    Raises
+    ------
+    ConfigError
+        If the grids that ``nll.keep_grids`` keeps would not fit.
+    """
+    g = ctx.geometry
+    grid_bytes = 4 * g.nx * g.ny * g.nz * len(cfg.phases)  # float32 buf, all phases
+    tdir.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(tdir).free
+    budget = cfg.nll.max_disk_gb * 1e9 if cfg.nll.max_disk_gb else 0.5 * free
+    n_s = len(ctx.candidates)
+    kept = {"none": 0, "base": 1, "all": len(ctx.ensemble.realizations)}[cfg.nll.keep_grids]
+    if kept and kept * n_s * grid_bytes > 0.9 * free:
+        raise ConfigError(
+            f"nll.keep_grids: {cfg.nll.keep_grids} keeps {kept * n_s * grid_bytes / 1e9:.1f} GB "
+            f"of travel-time grids but only {free / 1e9:.1f} GB is free; use keep_grids: none "
+            "(and validate a smaller network separately), fewer candidates or a coarser grid"
+        )
+    return max(1, min(n_s, int(budget // grid_bytes)))
+
+
 def _sensitivity(
     cfg: Config, out: Path, logs: LogScan, timings: dict[str, float]
 ) -> tuple[Sensitivity, _Context, float]:
@@ -311,6 +336,7 @@ def _sensitivity(
     gdir, tdir = (out / "grids").resolve(), (out / "traveltimes").resolve()
     keep = cfg.nll.keep_grids
     peak = 0.0
+    batch = _station_batch(cfg, ctx, tdir)
     timings["setup"] = time.perf_counter() - start
     start = time.perf_counter()
 
@@ -341,19 +367,41 @@ def _sensitivity(
             mroots = upcoming.result()
             if i + 1 < len(realizations):
                 upcoming = builder.submit(build, i + 1)
-            troots = time_grids(
-                mroots, ctx.candidates, ctx.frame, ctx.geometry.mode, tdir / name, cfg.nll, pool
-            )
-            t, g = realization_sensitivity(troots, sources, step)
-            T.append(t)
-            G.append(g)
-            peak = max(peak, dir_size_mb(gdir, tdir))
-            logs.scan(gdir / name, tdir / name)
-            if keep == "all" or (keep == "base" and r.is_base):
+            keeping = keep == "all" or (keep == "base" and r.is_base)
+            if keeping:
+                troots = time_grids(
+                    mroots, ctx.candidates, ctx.frame, ctx.geometry.mode, tdir / name, cfg.nll, pool
+                )
+                t, g = realization_sensitivity(troots, sources, step)
+                peak = max(peak, dir_size_mb(gdir, tdir))
+                logs.scan(gdir / name, tdir / name)
                 kept_models[r.index], kept_times[r.index] = mroots, troots
             else:
+                # Station batches that fit the disk budget, each deleted once read.
+                parts_t, parts_g = [], []
+                n_s = len(ctx.candidates)
+                for k, lo in enumerate(range(0, n_s, batch)):
+                    part = tdir / name / f"part{k:03d}"
+                    troots = time_grids(
+                        mroots,
+                        ctx.candidates.subset(range(lo, min(lo + batch, n_s))),
+                        ctx.frame,
+                        ctx.geometry.mode,
+                        part,
+                        cfg.nll,
+                        pool,
+                    )
+                    t_k, g_k = realization_sensitivity(troots, sources, step)
+                    parts_t.append(t_k)
+                    parts_g.append(g_k)
+                    peak = max(peak, dir_size_mb(gdir, tdir))
+                    logs.scan(gdir / name, part)
+                    shutil.rmtree(part)
+                t, g = np.concatenate(parts_t), np.concatenate(parts_g)
                 shutil.rmtree(gdir / name)
                 shutil.rmtree(tdir / name)
+            T.append(t)
+            G.append(g)
     if kept_models:
         _write_grids_manifest(ctx, out, VelGridSet(ctx.geometry, kept_models))
         _write_times_manifest(cfg, tdir, kept_times)
