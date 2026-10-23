@@ -39,6 +39,8 @@ Point the package at NonLinLoc with `nll.bin_dir` in the config (edit it in
 
 ## Usage
 
+The full user guide is in [docs/user-guide.md](docs/user-guide.md).
+
 Everything is configured in one YAML file. Start a project from `templates/config.yaml`
 (the commonly used parameters; fill in the lines marked `EDIT`); `examples/config.yaml`
 lists every option with its default (synthetic example sites and model).
