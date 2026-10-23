@@ -1,0 +1,76 @@
+output_dir: out_3d                   # 3D heterogeneous design
+velocity:
+  base: ../mak-ban/velocity.csv
+  attenuation:                 # Q for detection (placeholder: Qs = 50 x Vs, Qp = 2 Qs)
+    qs_per_vs: 50.0
+    qp_qs_ratio: 2.0
+  heterogeneity:               # 3D lateral variation (template values; no site data yet)
+    enabled: true
+    seed: 1
+    structure:
+      correlation: von_karman
+      hurst: 0.3
+      corr_len_km: [3.0, 1.0, 0.4]   # along strike, across strike, vertical
+      strike_deg: 45.0               # structural trend: a guess
+    per_layer: true
+    vp_pct: 5.0                      # Vp sd, %
+    vpvs_sd: 0.03
+    interface_sd_km: 0.05            # interface relief
+  perturb:                     # 1D uncertainty on top of the 3D fields; 30 realisations
+    enabled: true
+    n_realizations: 30
+    seed: 1
+    vp_pct: {sd: 5.0, mode: per_layer}
+    vpvs: {sd: 0.03, mode: global}
+    interface_sd_km: 0.05
+    layer_corr: 0.5
+stations: {candidates: ../mak-ban/candidates.csv}   # MEQ grid cells (see header)
+
+target:
+  depth_km: [1.0, 4.0]         # km below sea level, both boxes
+  spacing_km: 0.25
+  depth_spacing_km: 0.25
+  boxes:                       # weights: relative share of events (8 : 2)
+    - name: main               # 1 x 1 km
+      centre: {lat: 14.103698, long: 121.227257}
+      size_km: [1.0, 1.0]
+      rotation_deg: 45.0       # clockwise from north
+      weight: 8.0
+    - name: secondary          # 500 x 500 m
+      centre: {lat: 14.0933069, long: 121.1928637}
+      size_km: [0.5, 0.5]
+      weight: 2.0
+
+grid:
+  mode: 3d
+  dx_km: 0.1
+  depth_max_km: 5.0
+
+nll:
+  bin_dir: /home/steve/seismic/NonLinLoc/src/bin
+  keep_grids: none             # 3D grids for all candidates would fill the disk; the
+                               # recommended network is validated separately
+
+validation:
+  enabled: false               # see keep_grids
+  n_events: 100
+
+picks:
+  sigma_s: {P: 0.010, S: 0.020}  # pick accuracy (1 sd), s
+
+detection:
+  enabled: true
+  mode: magnitude
+  magnitude: 0.5               # smallest event to locate (Mw); Mw 0 is below what these sites can locate
+  magnitude_sensitivity: []    # no re-runs at other magnitudes (Mw 0 run kept in results_mw0/)
+  snr_threshold_db: 10.0
+  site_types:                  # placeholder noise (acceleration PSD, dB rel. 1 (m/s^2)^2/Hz)
+    surface: {kappa_s: 0.03, amplification: 2.0, noise_psd_db: -130.0}
+    borehole: {kappa_s: 0.005, amplification: 1.0, noise_psd_db: -150.0}
+
+design:
+  n_max: 40                    # largest network considered
+  n_restarts: 20
+  vertical_weight: 0.09        # (150 m / 500 m)^2: horizontal and depth goals weigh equally
+  target_horizontal_m: 150.0   # accuracy goals (RMS over located events): the smallest
+  target_depth_m: 500.0        # network meeting both is recommended

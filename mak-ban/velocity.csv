@@ -1,0 +1,14 @@
+# VELEST Monte Carlo (median of best 5% of 301 runs, 416 events), 0.5-2.0 km smoothed,
+# 1.75-2.25 km graded transition; Vp/Vs 1.728 throughout. Constant velocity in each layer.
+# First layer top raised from -0.6 to -1.1 km (same velocity) so the highest site (972 m)
+# is inside the model.
+top_km,vp,vs
+-1.10,2.43,1.406
+0.50,3.70,2.141
+1.00,3.80,2.199
+1.50,3.90,2.257
+1.75,4.30,2.488
+2.00,4.70,2.720
+2.25,5.10,2.951
+2.50,5.40,3.125
+3.50,5.67,3.281
