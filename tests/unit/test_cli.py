@@ -114,3 +114,29 @@ def test_run_fails_fast_on_settings_validation_cannot_use(tmp_path: Path) -> Non
     assert result.exit_code == 1
     assert "keep_grids" in result.output
     assert not (tmp_path / "out").exists()  # failed before doing any work
+
+
+def test_config_option_before_command(tmp_path: Path) -> None:
+    result = CliRunner().invoke(app, ["-c", str(EXAMPLE), "-o", str(tmp_path), "ensemble"])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "models" / "ensemble.json").is_file()
+
+
+def test_config_option_without_command_runs_pipeline(tmp_path: Path) -> None:
+    from example_config import write_example
+
+    path = write_example(tmp_path, None, nll={"keep_grids": "none"})
+    result = CliRunner().invoke(app, ["-c", str(path)])
+    assert result.exit_code == 1  # the run's fail-fast check: the pipeline was started
+    assert "keep_grids" in result.output
+
+
+def test_command_without_config_is_a_usage_error() -> None:
+    result = CliRunner().invoke(app, ["design"])
+    assert result.exit_code == 2
+    assert "netdesign -c config.yaml" in result.output
+
+
+def test_no_arguments_shows_help() -> None:
+    result = CliRunner().invoke(app, [])
+    assert "--config" in result.output

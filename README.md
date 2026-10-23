@@ -47,10 +47,11 @@ lists every option with its default (synthetic example sites and model).
 
 ```bash
 source /path/to/netdesign/.venv/bin/activate   # or prefix: uv run --project /path/to/netdesign
-netdesign run config.yaml           # everything: sensitivity, validate, design (+ QC report)
+netdesign -c config.yaml            # everything: sensitivity, validate, design (+ QC report)
 ```
 
-or stage by stage:
+(the same as `netdesign run config.yaml`), or stage by stage (`netdesign -c config.yaml
+sensitivity` also works):
 
 ```bash
 netdesign sensitivity config.yaml   # ensemble, grids, travel times, sensitivities (+ QC)

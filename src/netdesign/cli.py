@@ -32,7 +32,10 @@ from netdesign.validate import ValidationResult
 
 app = typer.Typer(no_args_is_help=True, help="Microseismic network design.")
 
-ConfigArg = Annotated[Path, typer.Argument(help="YAML config file")]
+ConfigArg = Annotated[
+    Path | None,
+    typer.Argument(help="YAML config file (or give it with -c before the command)"),
+]
 OutOpt = Annotated[
     Path | None, typer.Option("--out", "-o", help="override output_dir from the config")
 ]
@@ -47,14 +50,55 @@ def _fail(exc: NetDesignError) -> typer.Exit:
     return typer.Exit(1)
 
 
-@app.callback()
-def main() -> None:
-    """Microseismic network design."""
+def _inputs(ctx: typer.Context, config: Path | None, out: Path | None) -> tuple[Path, Path | None]:
+    """The config and output override: the command's own, else ``-c``/``-o`` before it."""
+    top = ctx.obj or {}
+    config = config or top.get("config")
+    if config is None:
+        typer.secho(
+            "error: give the config file: netdesign -c config.yaml [COMMAND], or "
+            "netdesign COMMAND config.yaml",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(2)
+    return config, out or top.get("out")
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            help="YAML config file; with no command, run the whole pipeline",
+        ),
+    ] = None,
+    out: OutOpt = None,
+) -> None:
+    """Microseismic network design.
+
+    `netdesign -c config.yaml` runs the whole pipeline (as `run`);
+    `netdesign -c config.yaml COMMAND` runs one stage.
+    """
+    ctx.obj = {"config": config, "out": out}
+    if ctx.invoked_subcommand is None:
+        if config is None:
+            typer.echo(ctx.get_help())
+            raise typer.Exit(0)
+        _run_all(config, out)
 
 
 @app.command()
-def ensemble(config: ConfigArg, out: OutOpt = None) -> None:
+def ensemble(
+    ctx: typer.Context,
+    config: ConfigArg = None,
+    out: OutOpt = None,
+) -> None:
     """Build the velocity/attenuation ensemble; writes <output_dir>/models."""
+    config, out = _inputs(ctx, config, out)
     try:
         cfg = load_config(config)
         result = run_ensemble(cfg, out)
@@ -64,8 +108,13 @@ def ensemble(config: ConfigArg, out: OutOpt = None) -> None:
 
 
 @app.command()
-def grids(config: ConfigArg, out: OutOpt = None) -> None:
+def grids(
+    ctx: typer.Context,
+    config: ConfigArg = None,
+    out: OutOpt = None,
+) -> None:
     """Build the ensemble and NonLinLoc model grids; writes <output_dir>/models and /grids."""
+    config, out = _inputs(ctx, config, out)
     try:
         cfg = load_config(config)
         result = run_vel_grids(cfg, out)
@@ -79,8 +128,13 @@ def grids(config: ConfigArg, out: OutOpt = None) -> None:
 
 
 @app.command()
-def traveltimes(config: ConfigArg, out: OutOpt = None) -> None:
+def traveltimes(
+    ctx: typer.Context,
+    config: ConfigArg = None,
+    out: OutOpt = None,
+) -> None:
     """Build model grids and Grid2Time travel-time grids; writes <output_dir>/traveltimes."""
+    config, out = _inputs(ctx, config, out)
     try:
         cfg = load_config(config)
         result = run_traveltimes(cfg, out)
@@ -95,8 +149,13 @@ def traveltimes(config: ConfigArg, out: OutOpt = None) -> None:
 
 
 @app.command()
-def report(config: ConfigArg, out: OutOpt = None) -> None:
+def report(
+    ctx: typer.Context,
+    config: ConfigArg = None,
+    out: OutOpt = None,
+) -> None:
     """Rebuild the QC report (<output_dir>/qc/report.html) from existing QC files."""
+    config, out = _inputs(ctx, config, out)
     try:
         cfg = load_config(config)
     except NetDesignError as exc:
@@ -107,7 +166,8 @@ def report(config: ConfigArg, out: OutOpt = None) -> None:
 
 @app.command()
 def sites(
-    config: ConfigArg,
+    ctx: typer.Context,
+    config: ConfigArg = None,
     out: OutOpt = None,
     force: Annotated[
         bool, typer.Option("--force", "-f", help="overwrite an existing candidates file")
@@ -117,6 +177,7 @@ def sites(
 
     Map of the sites in <output_dir>/qc/sites_map.png.
     """
+    config, out = _inputs(ctx, config, out)
     try:
         cfg = load_config(config)
         if cfg.sites is None or cfg.stations is None:
@@ -153,9 +214,14 @@ def sites(
 
 
 @app.command()
-def export(config: ConfigArg, out: OutOpt = None) -> None:
+def export(
+    ctx: typer.Context,
+    config: ConfigArg = None,
+    out: OutOpt = None,
+) -> None:
     """Shapefiles of the candidates (input and design outcome), target boxes, final network
     and every network size; writes <output_dir>/gis."""
+    config, out = _inputs(ctx, config, out)
     try:
         cfg = load_config(config)
         paths = run_export(cfg, out)
@@ -221,8 +287,13 @@ def _echo_design(cfg: Config, out: Path | None, result: DesignResult) -> None:
 
 
 @app.command()
-def sensitivity(config: ConfigArg, out: OutOpt = None) -> None:
+def sensitivity(
+    ctx: typer.Context,
+    config: ConfigArg = None,
+    out: OutOpt = None,
+) -> None:
     """Travel times and gradients at the target points; writes <output_dir>/sensitivity."""
+    config, out = _inputs(ctx, config, out)
     try:
         cfg = load_config(config)
         result = run_sensitivity(cfg, out)
@@ -232,11 +303,16 @@ def sensitivity(config: ConfigArg, out: OutOpt = None) -> None:
 
 
 @app.command()
-def validate(config: ConfigArg, out: OutOpt = None) -> None:
+def validate(
+    ctx: typer.Context,
+    config: ConfigArg = None,
+    out: OutOpt = None,
+) -> None:
     """Locate synthetic events with NonLinLoc; compare with predictions (<output_dir>/validation).
 
     Run `sensitivity` first.
     """
+    config, out = _inputs(ctx, config, out)
     try:
         cfg = load_config(config)
         result = run_validate(cfg, out)
@@ -246,8 +322,13 @@ def validate(config: ConfigArg, out: OutOpt = None) -> None:
 
 
 @app.command()
-def design(config: ConfigArg, out: OutOpt = None) -> None:
+def design(
+    ctx: typer.Context,
+    config: ConfigArg = None,
+    out: OutOpt = None,
+) -> None:
     """Choose the network (run `sensitivity` first); writes <output_dir>/design."""
+    config, out = _inputs(ctx, config, out)
     try:
         cfg = load_config(config)
         result = run_design(cfg, out, _progress)
@@ -257,11 +338,19 @@ def design(config: ConfigArg, out: OutOpt = None) -> None:
 
 
 @app.command()
-def run(config: ConfigArg, out: OutOpt = None) -> None:
+def run(
+    ctx: typer.Context,
+    config: ConfigArg = None,
+    out: OutOpt = None,
+) -> None:
     """Run the whole pipeline: sensitivity, validate (if validation.enabled), design.
 
     Stops at the first stage that fails. The QC report is rebuilt after every stage.
     """
+    _run_all(*_inputs(ctx, config, out))
+
+
+def _run_all(config: Path, out: Path | None) -> None:
     try:
         cfg = load_config(config)
         check_run(cfg)

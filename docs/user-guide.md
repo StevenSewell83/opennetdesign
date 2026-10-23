@@ -103,7 +103,7 @@ on `PATH`).
 mkdir myproject && cd myproject
 cp /path/to/netdesign/templates/config.yaml .
 # edit every line marked EDIT; add candidates.csv and a velocity model
-netdesign run config.yaml
+netdesign -c config.yaml        # or: netdesign run config.yaml
 ```
 
 When it finishes:
@@ -415,7 +415,14 @@ ratios, detection coverage and so on) are listed in `examples/config.yaml`.
 
 ## 7. Commands
 
-Every command takes the config file and an optional `--out DIR`.
+Give the config file with `-c` before the command, or after the command:
+
+```bash
+netdesign -c config.yaml                # no command: the whole pipeline (same as `run`)
+netdesign -c config.yaml design         # one stage
+netdesign design config.yaml            # the same, config after the command
+netdesign -c config.yaml -o other_out   # --out/-o overrides output_dir
+```
 
 | Command | What it does |
 |---|---|
